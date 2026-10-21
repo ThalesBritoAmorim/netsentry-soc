@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { NetworkTrafficChart } from './NetworkTrafficChart';
 import { IncidentHeatmapChart } from './IncidentHeatmapChart';
+import { RealtimeTrafficOverview } from './RealtimeTrafficOverview';
 
 interface DashboardViewProps {
   metrics: SystemMetrics;
@@ -282,7 +283,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         )}
       </div>
 
-      {/* 4. Threat Operations & Incident Center (Split 2-Column Balanced Viewport) */}
+      {/* 4. Real-time Traffic Telemetry Sub-section (Recharts Engine) */}
+      <RealtimeTrafficOverview 
+        metrics={metrics} 
+        trafficFlows={trafficFlows} 
+        alerts={alerts} 
+      />
+
+      {/* 5. Threat Operations & Incident Center (Split 2-Column Balanced Viewport) */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start min-w-0">
         {/* Left Column (7 cols): Alerts Feed & Mitigation Playbooks */}
         <div className="xl:col-span-7 space-y-3 min-w-0">

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Shield, Radio, Terminal, Cpu, Server, CheckCircle2, AlertCircle, Settings, Bot } from 'lucide-react';
+import { Shield, Radio, Terminal, Cpu, Server, CheckCircle2, AlertCircle, Settings, Bot, Sliders } from 'lucide-react';
 
-export type NavTab = 'dashboard' | 'devices' | 'traffic' | 'deploy' | 'reports' | 'ai-integrations';
+export type NavTab = 'dashboard' | 'devices' | 'traffic' | 'deploy' | 'reports' | 'ai-integrations' | 'parameters';
 
 interface NavbarProps {
   activeTab: NavTab;
@@ -114,6 +114,17 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Bot className="w-3.5 h-3.5" />
               <span>IA & Modelos</span>
+            </button>
+            <button
+              onClick={() => onTabChange('parameters')}
+              className={`whitespace-nowrap transition-colors pb-0.5 flex items-center gap-1.5 ${
+                activeTab === 'parameters'
+                  ? 'text-cyan-400 border-b-2 border-cyan-400'
+                  : 'hover:text-slate-200'
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Parâmetros</span>
             </button>
           </nav>
 
@@ -251,6 +262,12 @@ export const Navbar: React.FC<NavbarProps> = ({
             className={`whitespace-nowrap ${activeTab === 'ai-integrations' ? 'text-cyan-400 font-bold' : ''}`}
           >
             IA & Modelos
+          </button>
+          <button
+            onClick={() => onTabChange('parameters')}
+            className={`whitespace-nowrap ${activeTab === 'parameters' ? 'text-cyan-400 font-bold' : ''}`}
+          >
+            Parâmetros
           </button>
         </div>
       </div>

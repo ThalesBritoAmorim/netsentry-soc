@@ -13,6 +13,7 @@ import { TrafficLogsView } from './components/TrafficLogsView';
 import { PortainerDeployView } from './components/PortainerDeployView';
 import { ReportsBackupView } from './components/ReportsBackupView';
 import { AIIntegrationsView } from './components/AIIntegrationsView';
+import { AnalysisParametersView } from './components/AnalysisParametersView';
 import { MitigationModal } from './components/MitigationModal';
 import { AnomalySimulatorModal } from './components/AnomalySimulatorModal';
 import { KaliTerminalDrawer } from './components/KaliTerminalDrawer';
@@ -207,8 +208,17 @@ export default function App() {
         {activeTab === 'ai-integrations' && (
           <AIIntegrationsView
             alerts={engineState.alerts}
+            metrics={engineState.metrics}
+            devices={engineState.devices}
             onOpenKaliTerminal={handleOpenTerminalWithCommand}
             onToast={showToast}
+          />
+        )}
+
+        {activeTab === 'parameters' && (
+          <AnalysisParametersView
+            onToast={showToast}
+            onOpenKaliTerminal={handleOpenTerminalWithCommand}
           />
         )}
       </main>

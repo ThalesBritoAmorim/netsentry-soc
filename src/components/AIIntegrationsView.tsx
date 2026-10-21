@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { 
+  NetworkDevice,
+  SystemMetrics,
   AIProviderId, 
   AIProviderConfig, 
   AISettings, 
@@ -35,12 +37,16 @@ import {
 
 interface AIIntegrationsViewProps {
   alerts: ThreatAlert[];
+  metrics?: SystemMetrics;
+  devices?: NetworkDevice[];
   onOpenKaliTerminal?: (cmd: string) => void;
   onToast: (msg: string, type: 'success' | 'alert') => void;
 }
 
 export const AIIntegrationsView: React.FC<AIIntegrationsViewProps> = ({
   alerts,
+  metrics,
+  devices,
   onOpenKaliTerminal,
   onToast
 }) => {
@@ -162,39 +168,21 @@ export const AIIntegrationsView: React.FC<AIIntegrationsViewProps> = ({
     }
   };
 
-  // Run AI threat analysis on current alert
+  // Run AI threat analysis or live network posture analysis
   const handleRunAnalysis = async () => {
     setIsAnalyzing(true);
     setAiOutput(null);
 
-    const alertToAnalyze = alerts.find(a => a.status === 'active') || alerts[0] || {
-      id: 'alt-sample',
-      timestamp: new Date().toLocaleTimeString(),
-      title: 'Ataque ARP Poisoning em Andamento',
-      category: 'arp_poisoning',
-      severity: 'critical',
-      sourceIp: '192.168.1.240',
-      sourceMac: '52:54:00:fa:8c:19',
-      targetIp: '192.168.1.1',
-      protocol: 'ARP',
-      confidence: 98,
-      details: 'Conflito de IP e MAC detectado na interface primária eth0',
-      status: 'active',
-      playbook: {
-        id: 'pb-sample',
-        actionName: 'Bloqueio Iptables Netfilter',
-        description: 'Descarte no kernel',
-        severity: 'critical',
-        iptablesCommand: 'sudo iptables -I INPUT -m mac --mac-source 52:54:00:fa:8c:19 -j DROP',
-        kaliToolCommand: 'sudo nmap -sV -Pn 192.168.1.240',
-        automatedAvailable: true,
-        applied: false,
-        rollbackCommand: 'sudo iptables -D INPUT -m mac --mac-source 52:54:00:fa:8c:19 -j DROP'
-      }
-    };
-
     try {
-      const res = await aiService.analyzeThreat(alertToAnalyze as ThreatAlert);
+      const activeAlert = alerts.find(a => a.status === 'active') || alerts[0];
+      let res;
+      if (activeAlert) {
+        res = await aiService.analyzeThreat(activeAlert, metrics, devices);
+      } else {
+        // Zero alerts in network - analyze real live network posture
+        res = await aiService.analyzeNetworkPosture(metrics, devices || []);
+      }
+
       setAiOutput({
         analysis: res.analysis,
         riskLevel: res.riskLevel,
@@ -206,7 +194,7 @@ export const AIIntegrationsView: React.FC<AIIntegrationsViewProps> = ({
       });
       onToast(`Análise concluída com sucesso via ${res.providerUsed} (${res.modelUsed})`, 'success');
     } catch (err: any) {
-      onToast(`Erro ao gerar análise: ${err.message}`, 'alert');
+      onToast(`Erro ao gerar análise: ${err.message || 'Falha de comunicação'}`, 'alert');
     } finally {
       setIsAnalyzing(false);
     }
@@ -541,7 +529,11 @@ export const AIIntegrationsView: React.FC<AIIntegrationsViewProps> = ({
               ) : (
                 <>
                   <Zap className="w-3.5 h-3.5 fill-slate-950" />
-                  <span>Analisar Alerta Ativo com {activeProviderConfig.name}</span>
+                  <span>
+                    {alerts.length > 0 
+                      ? `Analisar Alerta Ativo com ${activeProviderConfig.name}` 
+                      : `Analisar Postura da Rede com ${activeProviderConfig.name}`}
+                  </span>
                 </>
               )}
             </button>

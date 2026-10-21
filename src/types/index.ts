@@ -187,3 +187,28 @@ export interface AISettings {
   ollamaEndpoint: string;
   temperature: number;
 }
+
+export interface AnalysisParameters {
+  // Detection Thresholds
+  ppsFloodThreshold: number;
+  portScanThreshold: number;
+  dnsEntropyThreshold: number;
+  arpSpoofSensitivity: 'strict' | 'moderate' | 'permissive';
+  
+  // Network Filters & Whitelists
+  whitelistedIps: string[];
+  protectedPorts: number[];
+  monitoredSubnets: string[];
+  
+  // AI Forensic Parameters
+  forensicDetailLevel: 'summary' | 'standard' | 'deep_forensic';
+  prioritizeMitre: boolean;
+  iptablesRuleType: 'drop' | 'reject' | 'tarpit';
+  autoAnonymizeTopology: boolean;
+  
+  // Response & Mitigation Policies
+  autoBlockHighSeverity: boolean;
+  blockTtlMinutes: number;
+  enableAudioAlerts: boolean;
+  enableDesktopBanners: boolean;
+}
