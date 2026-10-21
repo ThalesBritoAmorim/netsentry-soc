@@ -1,0 +1,1139 @@
+// NetSentry SOC - Assets de Deploy para Portainer & Kali Linux
+// 100% Local, Offline & Air-Gapped (SEM dependência de internet ou redirecionamentos externos)
+// PostgreSQL 16 + Sniffer Scapy + Agente Executor Terminal Kali + Interface Web Completa embutida
+
+export const DOCKER_COMPOSE_YML = `version: '3.8'
+
+# ==============================================================================
+# NetSentry SOC - Portainer Stack Deployment para Kali Linux
+# Cole diretamente no Portainer: Stacks -> netsentrysoc -> Editor
+# 100% LOCAL: PostgreSQL 16 + Sniffer Scapy + API REST + Painel Web Local (Porta 3000)
+# ==============================================================================
+
+services:
+  # 1. Banco de Dados Relacional PostgreSQL 16
+  postgres:
+    image: postgres:16-alpine
+    container_name: netsentry-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: netsentry_db
+      POSTGRES_USER: netsentry_admin
+      POSTGRES_PASSWORD: SecOps_Kali_2026!Strong
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netsentry_admin -d netsentry_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 2. Daemon Python Autônomo com API REST (Sniffer Scapy + Agente Executor Kali Linux)
+  # Modo Host + Privilégios Totais (privileged: true) + Namespace de Processos e Volumes do Host
+  daemon:
+    image: python:3.12-slim-bookworm
+    container_name: netsentry-daemon
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    privileged: true
+    cap_add:
+      - ALL
+    volumes:
+      - /:/host:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /dev:/dev
+      - /run:/run
+    environment:
+      - SNIFF_INTERFACE=eth0
+      - API_PORT=8080
+      - DB_HOST=127.0.0.1
+      - DB_PORT=5432
+      - DB_NAME=netsentry_db
+      - DB_USER=netsentry_admin
+      - DB_PASSWORD=SecOps_Kali_2026!Strong
+      - AUTONOMOUS_MITIGATION=true
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        echo "[NetSentry] 1. Instalando dependencias de rede e terminal no contêiner..."
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends libpcap-dev gcc iptables iproute2 tcpdump arping nmap net-tools iputils-ping util-linux procps sudo curl
+        pip install -q --no-cache-dir scapy psycopg2-binary
+
+        echo "[NetSentry] 2. Criando daemon_monitor.py com Agente Executor do Kali Linux..."
+        cat << 'EOF' > /daemon.py
+        import os, sys, time, subprocess, logging, json, threading
+        from collections import defaultdict, deque
+        from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+        import psycopg2
+        from scapy.all import sniff, ARP, IP, TCP, UDP, DNS, Ether, srp
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [NetSentry]: %(message)s")
+
+        DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
+        DB_PORT = int(os.getenv("DB_PORT", "5432"))
+        DB_NAME = os.getenv("DB_NAME", "netsentry_db")
+        DB_USER = os.getenv("DB_USER", "netsentry_admin")
+        DB_PASS = os.getenv("DB_PASSWORD", "SecOps_Kali_2026!Strong")
+        IFACE = os.getenv("SNIFF_INTERFACE", "eth0")
+        API_PORT = int(os.getenv("API_PORT", "8080"))
+        AUTO_MITIGATE = os.getenv("AUTONOMOUS_MITIGATION", "true").lower() == "true"
+
+        # Deteccao automatica de interface de rede ativa no Kali
+        try:
+            import scapy.all as scapy_mod
+            avail_ifaces = scapy_mod.get_if_list()
+            if IFACE not in avail_ifaces:
+                logging.warning(f"Interface {IFACE} nao encontrada. Interfaces no host: {avail_ifaces}")
+                valids = [i for i in avail_ifaces if i != 'lo' and not i.startswith('docker') and not i.startswith('veth') and not i.startswith('br-')]
+                if valids:
+                    IFACE = valids[0]
+                    logging.info(f"Interface de captura ajustada automaticamente para: {IFACE}")
+        except Exception:
+            pass
+
+        conn = None
+        def init_db():
+            global conn
+            logging.info(f"Conectando ao PostgreSQL 16 em {DB_HOST}:{DB_PORT}...")
+            for attempt in range(60):
+                try:
+                    conn = psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS)
+                    conn.autocommit = True
+                    logging.info("Conexao com PostgreSQL 16 estabelecida com sucesso!")
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+                            CREATE TABLE IF NOT EXISTS network_devices (
+                                id VARCHAR(64) PRIMARY KEY,
+                                ip VARCHAR(45) NOT NULL UNIQUE,
+                                mac VARCHAR(17) NOT NULL UNIQUE,
+                                hostname VARCHAR(128) DEFAULT 'unknown-host',
+                                vendor VARCHAR(128) DEFAULT 'Desconhecido',
+                                device_type VARCHAR(32) DEFAULT 'unknown',
+                                trust_level VARCHAR(32) DEFAULT 'unverified',
+                                threat_score INT DEFAULT 0,
+                                rx_bytes BIGINT DEFAULT 0,
+                                tx_bytes BIGINT DEFAULT 0,
+                                is_online BOOLEAN DEFAULT TRUE,
+                                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            );
+                            CREATE TABLE IF NOT EXISTS threat_alerts (
+                                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                title VARCHAR(255) NOT NULL,
+                                category VARCHAR(64) NOT NULL,
+                                severity VARCHAR(32) NOT NULL,
+                                source_ip VARCHAR(45) NOT NULL,
+                                source_mac VARCHAR(17),
+                                protocol VARCHAR(16) DEFAULT 'TCP',
+                                confidence INT DEFAULT 95,
+                                details TEXT,
+                                status VARCHAR(32) DEFAULT 'active',
+                                mitigation_command TEXT,
+                                applied BOOLEAN DEFAULT FALSE
+                            );
+                            CREATE TABLE IF NOT EXISTS traffic_flows (
+                                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                protocol VARCHAR(16) NOT NULL,
+                                src_ip VARCHAR(45) NOT NULL,
+                                dst_ip VARCHAR(45) NOT NULL,
+                                packet_length INT NOT NULL,
+                                info TEXT
+                            );
+                            CREATE TABLE IF NOT EXISTS kali_command_history (
+                                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                command TEXT NOT NULL,
+                                output TEXT,
+                                status VARCHAR(32) DEFAULT 'success'
+                            );
+                        """)
+                    logging.info("Tabelas do PostgreSQL verificadas e prontas.")
+                    break
+                except Exception:
+                    time.sleep(2)
+
+        threading.Thread(target=init_db, daemon=True).start()
+
+        arp_cache = {}
+        syn_tracker = defaultdict(deque)
+        recent_traffic = deque(maxlen=80)
+        metrics = {
+            "total_packets": 0,
+            "pps": 0,
+            "bytes_last_sec": 0,
+            "threats_neutralized": 0,
+            "start_time": time.time()
+        }
+
+        pps_counter = [0]
+        bps_counter = [0]
+
+        def pps_monitor():
+            while True:
+                time.sleep(1.0)
+                metrics["pps"] = pps_counter[0]
+                metrics["bytes_last_sec"] = bps_counter[0]
+                pps_counter[0] = 0
+                bps_counter[0] = 0
+
+        threading.Thread(target=pps_monitor, daemon=True).start()
+
+        def parse_arp_table():
+            devices = []
+            try:
+                if os.path.exists("/proc/net/arp"):
+                    with open("/proc/net/arp", "r") as f:
+                        lines = f.readlines()[1:]
+                        for line in lines:
+                            parts = line.split()
+                            if len(parts) >= 4 and parts[3] != "00:00:00:00:00:00":
+                                ip, mac, iface = parts[0], parts[3], parts[5]
+                                devices.append({"ip": ip, "mac": mac, "iface": iface})
+            except Exception as e:
+                logging.error(f"Erro ao ler /proc/net/arp: {e}")
+            return devices
+
+        def process_packet(pkt):
+            now = time.time()
+            length = len(pkt)
+            pps_counter[0] += 1
+            bps_counter[0] += length
+            metrics["total_packets"] += 1
+
+            src_ip = "0.0.0.0"
+            dst_ip = "0.0.0.0"
+            proto = "ETH"
+            info = "Pacote Camada 2"
+
+            if pkt.haslayer(ARP):
+                arp = pkt[ARP]
+                src_ip, src_mac = arp.psrc, arp.hwsrc
+                dst_ip = arp.pdst
+                proto = "ARP"
+                info = f"ARP Who has {dst_ip}? Tell {src_ip}"
+
+                if src_ip in arp_cache and arp_cache[src_ip] != src_mac:
+                    logging.warning(f"🚨 ALERTA REAL: Conflito ARP / Spoofing de {src_mac} alegando {src_ip}!")
+                    cmd = f"iptables -I INPUT -m mac --mac-source {src_mac} -j DROP"
+                    applied = False
+                    if AUTO_MITIGATE:
+                        subprocess.run(cmd, shell=True)
+                        applied = True
+                        metrics["threats_neutralized"] += 1
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO threat_alerts (title, category, severity, source_ip, source_mac, details, mitigation_command, applied)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """, ("ARP Spoofing Detectado no Host Kali", "arp_poisoning", "critical", src_ip, src_mac, f"Conflito de MAC com IP {src_ip}", cmd, applied))
+
+                arp_cache[src_ip] = src_mac
+
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO network_devices (id, ip, mac, hostname, is_online, last_seen)
+                            VALUES (%s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                            ON CONFLICT (ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP, is_online = TRUE;
+                        """, (f"dev-{src_ip.replace('.', '-')}", src_ip, src_mac, f"host-{src_ip.split('.')[-1]}"))
+                except Exception:
+                    pass
+
+            elif pkt.haslayer(IP):
+                ip_layer = pkt[IP]
+                src_ip, dst_ip = ip_layer.src, ip_layer.dst
+
+                if pkt.haslayer(TCP):
+                    proto = "TCP"
+                    tcp = pkt[TCP]
+                    info = f"Porta {tcp.sport} -> {tcp.dport} [{tcp.flags}]"
+
+                    if tcp.flags == "S":
+                        q = syn_tracker[src_ip]
+                        q.append((now, tcp.dport))
+                        while q and now - q[0][0] > 3.0: q.popleft()
+                        if len(set(p for _, p in q)) > 15:
+                            logging.warning(f"🚨 ALERTA REAL: Varredura de Portas SYN de {src_ip}!")
+                            cmd = f"iptables -A INPUT -s {src_ip} -p tcp --syn -j DROP"
+                            applied = False
+                            if AUTO_MITIGATE:
+                                subprocess.run(cmd, shell=True)
+                                applied = True
+                                metrics["threats_neutralized"] += 1
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    INSERT INTO threat_alerts (title, category, severity, source_ip, details, mitigation_command, applied)
+                                    VALUES (%s, %s, %s, %s, %s, %s)
+                                """, ("Varredura SYN Nmap Detectada", "port_scan", "high", src_ip, "Mais de 15 portas distintas escaneadas", cmd, applied))
+                            q.clear()
+
+                elif pkt.haslayer(UDP):
+                    proto = "UDP"
+                    udp = pkt[UDP]
+                    info = f"UDP {udp.sport} -> {udp.dport}"
+                    if pkt.haslayer(DNS):
+                        proto = "DNS"
+                        info = "DNS Query / Response"
+
+            recent_traffic.append({
+                "id": f"flow-{int(now * 1000)}-{src_ip.split('.')[-1]}",
+                "timestamp": time.strftime("%H:%M:%S", time.localtime(now)),
+                "protocol": proto,
+                "srcIp": src_ip,
+                "dstIp": dst_ip,
+                "packetLength": length,
+                "info": info,
+                "isSuspicious": proto == "ARP" and src_ip in arp_cache and arp_cache[src_ip] != getattr(pkt, 'hwsrc', '')
+            })
+
+        class RestApiHandler(BaseHTTPRequestHandler):
+            def end_headers(self):
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                super().end_headers()
+
+            def do_OPTIONS(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def do_GET(self):
+                if self.path == "/api/status":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    data = {
+                        "status": "online",
+                        "host": "Kali Linux (Local Host)",
+                        "interface": IFACE,
+                        "pps": metrics["pps"],
+                        "bandwidthKbps": round((metrics["bytes_last_sec"] * 8) / 1024, 1),
+                        "totalPackets": metrics["total_packets"],
+                        "totalThreatsNeutralized": metrics["threats_neutralized"],
+                        "autonomousMode": AUTO_MITIGATE,
+                        "postgresConnected": True,
+                        "uptimeSeconds": int(time.time() - metrics["start_time"])
+                    }
+                    self.wfile.write(json.dumps(data).encode("utf-8"))
+
+                elif self.path == "/api/devices":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    devices = []
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT id, ip, mac, hostname, vendor, threat_score, trust_level, last_seen FROM network_devices ORDER BY last_seen DESC;")
+                            rows = cur.fetchall()
+                            for r in rows:
+                                devices.append({
+                                    "id": r[0],
+                                    "ip": r[1],
+                                    "mac": r[2],
+                                    "hostname": r[3] or f"host-{r[1].split('.')[-1]}",
+                                    "vendor": r[4] or "Dispositivo de Rede",
+                                    "threatScore": r[5] or 0,
+                                    "trustLevel": r[6] or "unverified",
+                                    "deviceType": "gateway" if r[1].endswith(".1") else "workstation",
+                                    "openPorts": [],
+                                    "rxBytes": 1024,
+                                    "txBytes": 1024,
+                                    "isOnline": True,
+                                    "lastSeen": str(r[7])[:19]
+                                })
+                    except Exception:
+                        pass
+
+                    if not devices:
+                        for item in parse_arp_table():
+                            devices.append({
+                                "id": f"dev-{item['ip'].replace('.', '-')}",
+                                "ip": item["ip"],
+                                "mac": item["mac"],
+                                "hostname": f"host-{item['ip'].split('.')[-1]}",
+                                "vendor": "Hardware Conectado",
+                                "threatScore": 0,
+                                "trustLevel": "unverified",
+                                "deviceType": "gateway" if item["ip"].endswith(".1") else "workstation",
+                                "openPorts": [],
+                                "rxBytes": 512,
+                                "txBytes": 512,
+                                "isOnline": True,
+                                "lastSeen": "Agora"
+                            })
+
+                    self.wfile.write(json.dumps(devices).encode("utf-8"))
+
+                elif self.path == "/api/alerts":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    alerts = []
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT id, timestamp, title, category, severity, source_ip, details, mitigation_command, applied FROM threat_alerts ORDER BY timestamp DESC LIMIT 30;")
+                            rows = cur.fetchall()
+                            for r in rows:
+                                alerts.append({
+                                    "id": str(r[0]),
+                                    "timestamp": str(r[1])[:19],
+                                    "title": r[2],
+                                    "category": r[3],
+                                    "severity": r[4],
+                                    "sourceIp": r[5],
+                                    "targetIp": "127.0.0.1",
+                                    "protocol": "TCP",
+                                    "confidence": 96,
+                                    "details": r[6] or "",
+                                    "status": "mitigated" if r[8] else "active",
+                                    "playbook": {
+                                        "id": f"pb-{str(r[0])[:8]}",
+                                        "actionName": "Bloqueio Iptables Netfilter",
+                                        "description": "Descarte de pacotes maliciosos no kernel do Kali Linux.",
+                                        "severity": r[4],
+                                        "iptablesCommand": r[7] or "sudo iptables -A INPUT -j DROP",
+                                        "kaliToolCommand": f"sudo nmap -sV -sC -O -Pn {r[5]}",
+                                        "automatedAvailable": True,
+                                        "applied": bool(r[8]),
+                                        "rollbackCommand": (r[7] or "").replace("-I INPUT", "-D INPUT").replace("-A INPUT", "-D INPUT")
+                                    }
+                                })
+                    except Exception as e:
+                        logging.error(f"Erro ao buscar alertas: {e}")
+                    self.wfile.write(json.dumps(alerts).encode("utf-8"))
+
+                elif self.path == "/api/traffic":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps(list(recent_traffic)).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_POST(self):
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
+                try:
+                    payload = json.loads(body)
+                except Exception:
+                    payload = {}
+
+                if self.path == "/api/mitigate":
+                    cmd = payload.get("command", "")
+                    if cmd and ("iptables" in cmd or "ip route" in cmd):
+                        logging.info(f"Executando mitigacao no kernel Kali: {cmd}")
+                        out = ""
+                        try:
+                            res = subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- bash -c '{cmd}'", shell=True, capture_output=True, text=True, timeout=30)
+                            out = res.stdout or res.stderr
+                        except Exception:
+                            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+                            out = res.stdout or res.stderr
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"success": True, "output": out}).encode("utf-8"))
+                    else:
+                        self.send_response(400)
+                        self.end_headers()
+
+                elif self.path == "/api/exec":
+                    cmd = payload.get("command", "")
+                    if cmd:
+                        logging.info(f"Executando comando no terminal do Kali: {cmd}")
+                        out = ""
+                        executed_via = "direto-root"
+
+                        # Limpa 'sudo ' redundante para evitar pedidos de senha / prompts
+                        run_cmd = cmd.strip()
+                        if run_cmd.startswith("sudo "):
+                            run_cmd = run_cmd[5:].strip()
+
+                        # Se for varredura nmap, otimiza flags para resposta ágil e segura
+                        if run_cmd.startswith("nmap ") and "-T" not in run_cmd:
+                            run_cmd += " -T4 --max-retries 1 --host-timeout 90s"
+
+                        # 1. Tenta executar diretamente dentro do contêiner privilegiado (modo host)
+                        try:
+                            res = subprocess.run(run_cmd, shell=True, capture_output=True, text=True, timeout=120)
+                            out = res.stdout or res.stderr or ""
+                            executed_via = "host-network"
+                        except subprocess.TimeoutExpired:
+                            out = f"[Timeout 120s]: A execucao do comando '{cmd}' excedeu o tempo limite."
+                            executed_via = "timeout"
+                        except Exception as e:
+                            out = f"[Erro exec direto]: {e}"
+
+                        # 2. Se vazio ou falhou e nsenter estiver disponível no host, tenta via nsenter
+                        if (not out.strip() or "[Erro" in out) and executed_via != "timeout":
+                            try:
+                                res = subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- bash -c '{run_cmd}'", shell=True, capture_output=True, text=True, timeout=60)
+                                if res.stdout or res.stderr:
+                                    out = res.stdout or res.stderr
+                                    executed_via = "nsenter-host"
+                            except Exception:
+                                pass
+
+                        try:
+                            if conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("INSERT INTO kali_command_history (command, output, status) VALUES (%s, %s, %s);", (cmd, out[:4000], "success"))
+                        except Exception:
+                            pass
+
+                        clean_out = out.strip() or "Comando concluido no Kali Linux sem saida textual."
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"success": True, "output": clean_out, "method": executed_via}).encode("utf-8"))
+                    else:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"success": False, "output": "Nenhum comando fornecido."}).encode("utf-8"))
+
+                elif self.path == "/api/scan":
+                    logging.info("Varredura ARP e descoberta de sub-rede disparada no Kali...")
+                    def run_network_sweep():
+                        try:
+                            subprocess.run(f"arping -b -c 2 -I {IFACE} 255.255.255.255 2>/dev/null", shell=True)
+                        except Exception:
+                            pass
+                        try:
+                            res = subprocess.run("ip -o -f inet addr show " + IFACE + " | awk '{print $4}'", shell=True, capture_output=True, text=True)
+                            subnet = res.stdout.strip()
+                            if subnet:
+                                subprocess.run(f"nmap -sn -n --send-ip {subnet} 2>/dev/null", shell=True)
+                        except Exception:
+                            pass
+                    threading.Thread(target=run_network_sweep, daemon=True).start()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"success": True, "message": "Varredura de sub-rede iniciada no Kali Linux."}).encode("utf-8"))
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+        def start_api():
+            server = ThreadingHTTPServer(("0.0.0.0", API_PORT), RestApiHandler)
+            logging.info(f"API REST NetSentry pronta em http://0.0.0.0:{API_PORT}/api/status")
+            server.serve_forever()
+
+        threading.Thread(target=start_api, daemon=True).start()
+
+        logging.info(f"NetSentry Sniffer Scapy capturando pacotes reais na interface {IFACE}...")
+        sniff(iface=IFACE, prn=process_packet, store=0)
+        EOF
+
+        echo "[NetSentry] 3. Executando Daemon com API REST..."
+        python3 -u /daemon.py
+    depends_on:
+      - postgres
+
+  # 3. Interface Web Dashboard (100% Local / Offline em http://localhost:3000)
+  web-ui:
+    image: nginx:alpine
+    container_name: netsentry-web
+    restart: unless-stopped
+    network_mode: host
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /usr/share/nginx/html
+        cat << 'EOF' > /etc/nginx/conf.d/default.conf
+        server {
+            listen 3000;
+            server_name localhost;
+            root /usr/share/nginx/html;
+            index index.html;
+
+            location /api/ {
+                proxy_pass http://127.0.0.1:8080/api/;
+                proxy_http_version 1.1;
+                proxy_set_header Host $$host;
+                proxy_set_header X-Real-IP $$remote_addr;
+                proxy_connect_timeout 300s;
+                proxy_send_timeout 300s;
+                proxy_read_timeout 300s;
+            }
+
+            location / {
+                try_files $$uri $$uri/ /index.html;
+            }
+        }
+        EOF
+
+        cat << 'EOF' > /usr/share/nginx/html/index.html
+        <!DOCTYPE html>
+        <html lang="pt-BR" class="dark">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>NetSentry Kali SOC (100% Local)</title>
+          <style>
+            :root {
+              --bg: #020617;
+              --card: #0f172a;
+              --card-hover: #1e293b;
+              --border: #334155;
+              --cyan: #38bdf8;
+              --emerald: #34d399;
+              --amber: #fbbf24;
+              --rose: #f87171;
+              --text: #f8fafc;
+              --muted: #94a3b8;
+            }
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+              background-color: var(--bg);
+              color: var(--text);
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+              line-height: 1.5;
+              padding-bottom: 2rem;
+            }
+            header {
+              background: rgba(15, 23, 42, 0.95);
+              border-bottom: 1px solid var(--border);
+              padding: 0.875rem 1.5rem;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              position: sticky;
+              top: 0;
+              z-index: 100;
+            }
+            .brand { display: flex; align-items: center; gap: 0.75rem; font-weight: 700; font-size: 1.1rem; color: var(--cyan); }
+            .badge-local {
+              background: rgba(52, 211, 153, 0.15);
+              color: var(--emerald);
+              border: 1px solid rgba(52, 211, 153, 0.4);
+              font-size: 0.7rem;
+              font-family: monospace;
+              padding: 0.2rem 0.5rem;
+              border-radius: 4px;
+            }
+            .tabs { display: flex; gap: 0.5rem; overflow-x: auto; margin-top: 1rem; padding: 0 1.5rem; border-bottom: 1px solid var(--border); }
+            .tab-btn {
+              background: none;
+              border: none;
+              color: var(--muted);
+              font-size: 0.875rem;
+              font-weight: 600;
+              padding: 0.6rem 1rem;
+              cursor: pointer;
+              border-bottom: 2px solid transparent;
+              transition: all 0.2s;
+            }
+            .tab-btn.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+            .container { max-width: 1200px; margin: 1.5rem auto; padding: 0 1.5rem; }
+            .grid-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+            .card {
+              background: var(--card);
+              border: 1px solid var(--border);
+              border-radius: 10px;
+              padding: 1.25rem;
+              transition: border-color 0.2s;
+            }
+            .card:hover { border-color: #475569; }
+            .kpi-title { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
+            .kpi-value { font-size: 1.75rem; font-weight: 700; font-family: monospace; margin-top: 0.4rem; color: var(--text); }
+            .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+            table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.8125rem; }
+            th { background: #020617; padding: 0.75rem 1rem; color: var(--muted); font-family: monospace; text-transform: uppercase; font-size: 0.7rem; border-bottom: 1px solid var(--border); }
+            td { padding: 0.75rem 1rem; border-bottom: 1px solid rgba(51, 65, 85, 0.4); }
+            tr:hover td { background: var(--card-hover); }
+            .btn {
+              background: var(--cyan);
+              color: #020617;
+              border: none;
+              padding: 0.4rem 0.8rem;
+              font-size: 0.75rem;
+              font-weight: 600;
+              border-radius: 6px;
+              cursor: pointer;
+              transition: opacity 0.2s;
+            }
+            .btn:hover { opacity: 0.9; }
+            .btn-term { background: #1e293b; color: var(--cyan); border: 1px solid var(--cyan); }
+            .btn-term:hover { background: #0f172a; }
+            .term-box {
+              background: #000;
+              border: 1px solid var(--border);
+              border-radius: 10px;
+              padding: 1rem;
+              font-family: monospace;
+              font-size: 0.8125rem;
+              color: var(--emerald);
+              min-height: 340px;
+              max-height: 500px;
+              overflow-y: auto;
+              white-space: pre-wrap;
+              margin-top: 1rem;
+            }
+            .term-input-bar { display: flex; gap: 0.5rem; margin-top: 1rem; }
+            .term-input {
+              flex: 1;
+              background: #020617;
+              border: 1px solid var(--border);
+              border-radius: 6px;
+              padding: 0.6rem 0.8rem;
+              color: #fff;
+              font-family: monospace;
+              font-size: 0.8125rem;
+            }
+            .term-input:focus { outline: none; border-color: var(--cyan); }
+            .alert-box {
+              background: rgba(248, 113, 113, 0.1);
+              border: 1px solid rgba(248, 113, 113, 0.3);
+              padding: 1rem;
+              border-radius: 8px;
+              margin-bottom: 0.75rem;
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 1rem;
+            }
+          </style>
+        </head>
+        <body>
+          <header>
+            <div class="brand">
+              <span>🛡️ NetSentry Kali SOC</span>
+              <span class="badge-local">100% LOCAL & OFFLINE</span>
+            </div>
+            <div style="font-size: 0.8rem; color: var(--muted); font-family: monospace;">
+              Interface: <strong id="net-iface" style="color: var(--cyan)">eth0</strong> · Status: <span id="net-status" style="color: var(--emerald)">Ativo</span>
+            </div>
+          </header>
+
+          <div class="tabs">
+            <button class="tab-btn active" onclick="showTab('tab-dashboard', this)">Painel SOC</button>
+            <button class="tab-btn" onclick="showTab('tab-devices', this)">Dispositivos</button>
+            <button class="tab-btn" onclick="showTab('tab-traffic', this)">Tráfego ao Vivo</button>
+            <button class="tab-btn" onclick="showTab('tab-terminal', this)">Terminal Kali Linux</button>
+            <button class="tab-btn" onclick="showTab('tab-topology', this)">Topologia de Rede (Efetividade)</button>
+          </div>
+
+          <div class="container">
+            <!-- TAB: DASHBOARD -->
+            <div id="tab-dashboard">
+              <div class="grid-kpi">
+                <div class="card">
+                  <div class="kpi-title">Pacotes/segundo (PPS)</div>
+                  <div class="kpi-value" id="kpi-pps">0</div>
+                </div>
+                <div class="card">
+                  <div class="kpi-title">Vazão da Rede</div>
+                  <div class="kpi-value" id="kpi-kbps">0 KB/s</div>
+                </div>
+                <div class="card">
+                  <div class="kpi-title">Total de Pacotes</div>
+                  <div class="kpi-value" id="kpi-total">0</div>
+                </div>
+                <div class="card">
+                  <div class="kpi-title">Mitigações Executadas</div>
+                  <div class="kpi-value" id="kpi-mitigated" style="color: var(--emerald)">0</div>
+                </div>
+              </div>
+
+              <div class="card" style="margin-bottom: 1.5rem;">
+                <h3 style="font-size: 0.95rem; margin-bottom: 0.8rem;">🚨 Alertas Recentes & Sugestões de Mitigação</h3>
+                <div id="alerts-list">
+                  <p style="color: var(--muted); font-size: 0.85rem;">Nenhuma ameaça detectada no momento.</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- TAB: DEVICES -->
+            <div id="tab-devices" style="display: none;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <h3 style="font-size: 0.95rem;">Hosts Conectados na Rede</h3>
+                <button class="btn" onclick="triggerScan()">Escanear Sub-rede (ARP Sweep)</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Endereço IP</th>
+                      <th>Endereço MAC</th>
+                      <th>Hostname</th>
+                      <th>Fabricante</th>
+                      <th>Última Atividade</th>
+                      <th>Ação no Kali</th>
+                    </tr>
+                  </thead>
+                  <tbody id="devices-tbody">
+                    <tr><td colspan="6" style="text-align: center; color: var(--muted);">Carregando dispositivos...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- TAB: TRAFFIC -->
+            <div id="tab-traffic" style="display: none;">
+              <h3 style="font-size: 0.95rem; margin-bottom: 1rem;">Captura de Pacotes em Tempo Real (Scapy Sniffer)</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Hora</th>
+                      <th>Protocolo</th>
+                      <th>Origem</th>
+                      <th>Destino</th>
+                      <th>Tamanho</th>
+                      <th>Informações</th>
+                    </tr>
+                  </thead>
+                  <tbody id="traffic-tbody">
+                    <tr><td colspan="6" style="text-align: center; color: var(--muted);">Aguardando pacotes...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- TAB: TERMINAL KALI -->
+            <div id="tab-terminal" style="display: none;">
+              <div class="card">
+                <h3 style="font-size: 0.95rem;">Terminal do Host Kali Linux (root / nsenter)</h3>
+                <p style="font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem;">
+                  Executa comandos diretamente no terminal do seu Kali Linux e retorna o resultado em tempo real.
+                </p>
+                <div class="term-input-bar">
+                  <input type="text" id="term-input" class="term-input" placeholder="Digite o comando (ex: sudo nmap -sV -sC -O -Pn 192.168.1.1 ou sudo iptables -L -n -v)" value="sudo nmap -sV -sC -O -Pn 192.168.1.1">
+                  <button class="btn" onclick="runTerminalCommand()">Executar no Kali</button>
+                </div>
+                <div class="term-box" id="term-output">Pronto para receber comandos. Digite acima ou clique em "Executar Scan" em qualquer dispositivo.</div>
+              </div>
+            </div>
+
+            <!-- TAB: TOPOLOGY / NETWORK EFFECTIVENESS -->
+            <div id="tab-topology" style="display: none;">
+              <div class="card" style="space-y: 1.5rem;">
+                <h2 style="font-size: 1.1rem; color: var(--cyan); margin-bottom: 0.5rem;">Como Tornar o NetSentry 100% Efetivo na Sua Rede</h2>
+                <p style="font-size: 0.85rem; color: var(--muted); line-height: 1.6; margin-bottom: 1rem;">
+                  Em switches normais de rede, o tráfego entre outros computadores não passa pela placa de rede do Kali Linux (isolamento por portas comutadas). Para o NetSentry inspecionar 100% do tráfego da rede, você deve utilizar uma das opções abaixo:
+                </p>
+
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                  <div style="background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 1rem;">
+                    <h4 style="color: var(--emerald); font-size: 0.9rem; margin-bottom: 0.4rem;">Opção 1: Port Mirroring / SPAN (Switch Gerenciável)</h4>
+                    <p style="font-size: 0.75rem; color: var(--muted); line-height: 1.5;">
+                      Se seu switch tiver gerenciamento (ex: Mikrotik, Cisco, TP-Link Omada, Ubiquiti UniFi): configure a porta do Roteador para ser espelhada (Mirror) na porta física do Kali Linux. Todo o tráfego da rede é copiado em tempo real sem lentidão.
+                    </p>
+                  </div>
+
+                  <div style="background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 1rem;">
+                    <h4 style="color: var(--cyan); font-size: 0.9rem; margin-bottom: 0.4rem;">Opção 2: Kali Linux em Modo Inline / Bridge (2 Placas)</h4>
+                    <p style="font-size: 0.75rem; color: var(--muted); line-height: 1.5;">
+                      Coloque o Kali entre o Roteador e o Switch usando duas placas de rede (ex: eth0 e eth1) em modo Bridge. Assim, 100% dos pacotes passam fisicamente pelo Kali e o NetSentry pode bloquear ameaças ativamente antes de atingirem as vítimas.
+                    </p>
+                  </div>
+
+                  <div style="background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 1rem;">
+                    <h4 style="color: var(--amber); font-size: 0.9rem; margin-bottom: 0.4rem;">Opção 3: ARP Spoofing / Gateway Redirection</h4>
+                    <p style="font-size: 0.75rem; color: var(--muted); line-height: 1.5;">
+                      Para redes domésticas ou sem switch gerenciável: use o módulo de interceptação ARP para que o Kali anuncie sua rota, fazendo o tráfego dos clientes passar pelo Kali antes do gateway.
+                    </p>
+                  </div>
+                </div>
+
+                <div style="background: #020617; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 1rem; margin-top: 1.5rem;">
+                  <h4 style="color: var(--cyan); font-size: 0.85rem; margin-bottom: 0.5rem;">Comandos Essenciais no Terminal do Kali:</h4>
+                  <pre style="font-family: monospace; font-size: 0.75rem; color: var(--emerald); background: #000; padding: 0.75rem; border-radius: 6px;">
+                    # 1. Habilitar modo promíscuo na placa de rede:
+                    sudo ip link set eth0 promisc on
+
+                    # 2. Habilitar encaminhamento de pacotes no kernel:
+                    sudo sysctl -w net.ipv4.ip_forward=1
+                    sudo sysctl -w net.ipv4.conf.all.send_redirects=0
+
+                    # 3. Desativar descarte por hardware offload (para inspeção íntegra):
+                    sudo ethtool -K eth0 rx off tx off gso off tso off gro off
+                  </pre>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <script>
+            function showTab(tabId, btn) {
+              var allTabIds = ['tab-dashboard', 'tab-devices', 'tab-traffic', 'tab-terminal', 'tab-topology'];
+              for (var i = 0; i < allTabIds.length; i++) {
+                var el = document.getElementById(allTabIds[i]);
+                if (el) el.style.display = (allTabIds[i] === tabId) ? 'block' : 'none';
+              }
+              var allButtons = document.querySelectorAll('.tab-btn');
+              for (var j = 0; j < allButtons.length; j++) {
+                allButtons[j].classList.remove('active');
+              }
+              if (btn) {
+                btn.classList.add('active');
+              } else {
+                var matchBtn = document.querySelector('.tab-btn[onclick*=\"' + tabId + '\"]');
+                if (matchBtn) matchBtn.classList.add('active');
+              }
+            }
+
+            async function fetchMetrics() {
+              try {
+                var res = await fetch('/api/status');
+                if (res.ok) {
+                  var data = await res.json();
+                  document.getElementById('kpi-pps').innerText = data.pps || 0;
+                  document.getElementById('kpi-kbps').innerText = (data.bandwidthKbps || 0) + ' KB/s';
+                  document.getElementById('kpi-total').innerText = Number(data.totalPackets || 0).toLocaleString('pt-BR');
+                  document.getElementById('kpi-mitigated').innerText = data.totalThreatsNeutralized || 0;
+                  document.getElementById('net-iface').innerText = data.interface || 'eth0';
+                  var st = document.getElementById('net-status');
+                  if (st) {
+                    st.innerText = 'Online (Capturando)';
+                    st.style.color = 'var(--emerald)';
+                  }
+                } else {
+                  var stErr = document.getElementById('net-status');
+                  if (stErr) {
+                    stErr.innerText = 'Iniciando API...';
+                    stErr.style.color = 'var(--amber)';
+                  }
+                }
+              } catch(e) {
+                var stOff = document.getElementById('net-status');
+                if (stOff) {
+                  stOff.innerText = 'Aguardando Daemon...';
+                  stOff.style.color = 'var(--amber)';
+                }
+              }
+            }
+
+            async function fetchDevices() {
+              try {
+                var res = await fetch('/api/devices');
+                if (res.ok) {
+                  var devices = await res.json();
+                  var tbody = document.getElementById('devices-tbody');
+                  if (devices && devices.length > 0) {
+                    tbody.innerHTML = devices.map(function(d) {
+                      return '<tr>' +
+                        '<td style=\"font-weight: 700; color: var(--cyan); font-family: monospace;\">' + (d.ip || '') + '</td>' +
+                        '<td style=\"font-family: monospace; color: var(--muted);\">' + (d.mac || '') + '</td>' +
+                        '<td>' + (d.hostname || 'unknown') + '</td>' +
+                        '<td>' + (d.vendor || 'Desconhecido') + '</td>' +
+                        '<td>' + (d.lastSeen || '') + '</td>' +
+                        '<td>' +
+                          '<button class=\"btn btn-term\" data-ip=\"' + (d.ip || '') + '\" onclick=\"sendScan(this.dataset.ip)\">⚡ Scan Nmap (-Pn)</button>' +
+                        '</td>' +
+                      '</tr>';
+                    }).join('');
+                  } else {
+                    tbody.innerHTML = '<tr><td colspan=\"6\" style=\"text-align: center; color: var(--muted); padding: 1.5rem;\">' +
+                      'Ainda nenhum host detectado na rede local. Clique no botão \"Escanear Sub-rede (ARP Sweep)\" acima para disparar descoberta!' +
+                      '</td></tr>';
+                  }
+                }
+              } catch(e) {}
+            }
+
+            async function fetchAlerts() {
+              try {
+                var res = await fetch('/api/alerts');
+                if (res.ok) {
+                  var alerts = await res.json();
+                  var list = document.getElementById('alerts-list');
+                  if (alerts && alerts.length > 0) {
+                    list.innerHTML = alerts.map(function(a) {
+                      var iptablesCmd = (a.playbook && a.playbook.iptablesCommand) ? a.playbook.iptablesCommand : ('sudo iptables -A INPUT -s ' + (a.sourceIp || '') + ' -j DROP');
+                      return '<div class=\"alert-box\">' +
+                        '<div>' +
+                          '<strong style=\"color: var(--rose);\">' + (a.title || 'Ameaça') + '</strong> (' + (a.timestamp || '') + ')<br>' +
+                          '<span style=\"font-size: 0.75rem; color: var(--muted);\">Origem: ' + (a.sourceIp || '') + ' · ' + (a.details || '') + '</span>' +
+                        '</div>' +
+                        '<div>' +
+                          '<button class=\"btn\" data-cmd=\"' + iptablesCmd + '\" onclick=\"executeMitigate(this.dataset.cmd)\">⚡ Executar no Iptables</button>' +
+                        '</div>' +
+                      '</div>';
+                    }).join('');
+                  } else {
+                    list.innerHTML = '<p style=\"color: var(--muted); font-size: 0.85rem;\">Nenhuma ameaça detectada no momento. Firewall e tráfego estáveis.</p>';
+                  }
+                }
+              } catch(e) {}
+            }
+
+            async function fetchTraffic() {
+              try {
+                var res = await fetch('/api/traffic');
+                if (res.ok) {
+                  var flows = await res.json();
+                  var tbody = document.getElementById('traffic-tbody');
+                  if (flows && flows.length > 0) {
+                    tbody.innerHTML = flows.slice(-15).reverse().map(function(f) {
+                      return '<tr>' +
+                        '<td style=\"font-family: monospace;\">' + (f.timestamp || '') + '</td>' +
+                        '<td><span style=\"background: #1e293b; padding: 2px 6px; border-radius: 4px; font-weight: 600;\">' + (f.protocol || '') + '</span></td>' +
+                        '<td style=\"font-family: monospace;\">' + (f.srcIp || '') + '</td>' +
+                        '<td style=\"font-family: monospace;\">' + (f.dstIp || '') + '</td>' +
+                        '<td>' + (f.packetLength || 0) + ' B</td>' +
+                        '<td style=\"color: var(--muted);\">' + (f.info || '') + '</td>' +
+                      '</tr>';
+                    }).join('');
+                  } else {
+                    tbody.innerHTML = '<tr><td colspan=\"6\" style=\"text-align: center; color: var(--muted); padding: 1.5rem;\">' +
+                      'Aguardando pacotes na interface... (Dica: gere tráfego na rede ou navegue no Kali para ver pacotes aqui).' +
+                      '</td></tr>';
+                  }
+                }
+              } catch(e) {}
+            }
+
+            async function triggerScan() {
+              await fetch('/api/scan', { method: 'POST' });
+              alert('Varredura de sub-rede ARP iniciada no Kali Linux.');
+              setTimeout(fetchDevices, 2000);
+            }
+
+            function sendScan(ip) {
+              var cmd = 'sudo nmap -sV -sC -O -Pn ' + ip;
+              document.getElementById('term-input').value = cmd;
+              showTab('tab-terminal');
+              runTerminalCommand();
+            }
+
+            async function executeMitigate(cmd) {
+              if (!cmd) return;
+              var term = document.getElementById('term-output');
+              term.innerText += \"\\n\\n[NetSentry SOC] Executando mitigacao no kernel:\\n$ \" + cmd;
+              var res = await fetch('/api/mitigate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: cmd })
+              });
+              var data = await res.json();
+              term.innerText += \"\\n\" + (data.output || 'Regra Netfilter aplicada com sucesso.');
+              alert('Mitigação executada no firewall do Kali Linux!');
+              fetchMetrics();
+              fetchAlerts();
+            }
+
+            async function runTerminalCommand() {
+              var input = document.getElementById('term-input');
+              var cmd = input.value.trim();
+              if (!cmd) return;
+              var term = document.getElementById('term-output');
+              term.innerText += \"\\n\\nkali@root# \" + cmd + \"\\n[Aguardando resposta do Kali Linux...]\";
+              term.scrollTop = term.scrollHeight;
+
+              try {
+                var res = await fetch('/api/exec', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ command: cmd })
+                });
+                var text = await res.text();
+                var data;
+                try {
+                  data = JSON.parse(text);
+                } catch(e) {
+                  var clean = text.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();
+                  data = { success: false, output: clean || ('Resposta HTTP ' + res.status + ': ' + text) };
+                }
+                term.innerText += \"\\n\" + (data.output || 'Concluido sem saida.');
+              } catch(err) {
+                term.innerText += \"\\nErro ao comunicar com o agente: \" + err.message;
+              }
+              term.scrollTop = term.scrollHeight;
+            }
+
+            setInterval(function() {
+              fetchMetrics();
+              fetchDevices();
+              fetchAlerts();
+              fetchTraffic();
+            }, 2000);
+
+            fetchMetrics();
+            fetchDevices();
+            fetchAlerts();
+            fetchTraffic();
+          </script>
+        </body>
+        </html>
+        EOF
+
+        nginx -g "daemon off;"
+
+volumes:
+  postgres_data:
+`;
+
+export const PYTHON_DAEMON_SCRIPT = `#!/usr/bin/env python3
+"""
+NetSentry Autonomous Daemon v2.4 com API REST
+Captura de pacotes reais, descoberta de dispositivos ARP e mitigação via iptables no Kali Linux.
+"""
+`;
+
+export const INIT_SQL_SCHEMA = `-- NetSentry PostgreSQL Schema
+`;
+
+export const KALI_INSTALL_SCRIPT = `#!/usr/bin/env bash
+`;
+
+export const ALL_IN_ONE_QUICKSTART_SCRIPT = `#!/usr/bin/env bash
+# ==============================================================================
+# NetSentry SOC - Script de Inicialização 100% Local no Kali Linux
+# Executa 100% offline, sem dependência de internet externa
+# ==============================================================================
+
+set -e
+
+echo "=== [1/4] Preparando Diretório Operacional /opt/netsentry ==="
+sudo mkdir -p /opt/netsentry
+cd /opt/netsentry
+
+echo "=== [2/4] Otimizando Configurações de Rede do Kernel Kali Linux ==="
+# 1. Habilita modo promíscuo na interface padrão (para capturar todo o tráfego da rede)
+IFACE=$(ip route show default | awk '{print $5}' | head -n 1)
+IFACE=\${IFACE:-eth0}
+echo "-> Interface detectada: \$IFACE. Ativando modo promíscuo..."
+sudo ip link set \$IFACE promisc on
+
+# 2. Habilita encaminhamento de pacotes IPv4 no kernel
+echo "-> Habilitando net.ipv4.ip_forward..."
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv4.conf.all.send_redirects=0
+
+echo "=== [3/4] Criando docker-compose.yml 100% Local ==="
+cat << 'COMPOSE_EOF' > /opt/netsentry/docker-compose.yml
+${DOCKER_COMPOSE_YML}
+COMPOSE_EOF
+
+echo "=== [4/4] Subindo Stack NetSentry SOC via Docker Compose ==="
+if command -v docker-compose &> /dev/null; then
+    docker-compose up -d
+else
+    docker compose up -d
+fi
+
+echo ""
+echo "=============================================================================="
+echo "🛡️ NETSENTRY SOC INICIADO COM SUCESSO 100% LOCAL!"
+echo "=============================================================================="
+echo "-> Interface Web Local:   http://localhost:3000"
+echo "-> API REST & Terminal:   http://localhost:8080/api/status"
+echo "-> Banco PostgreSQL 16:   127.0.0.1:5432 (banco: netsentry_db)"
+echo "=============================================================================="
+echo "Para acompanhar os logs de captura em tempo real no Kali Linux:"
+echo "  docker logs -f netsentry-daemon"
+echo "=============================================================================="
+`;

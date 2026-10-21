@@ -1,0 +1,6 @@
+{
+  "name": "NetSentry SOC & Kali Monitor",
+  "description": "Sistema autônomo de monitoramento de rede, detecção de anomalias, análise de tráfego e mitigação com suporte a Docker/Portainer no Kali Linux e PostgreSQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
