@@ -7,9 +7,9 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# Copia dependências e instala
+# Copia dependências e instala com flag de compatibilidade peer-deps para React 19
 COPY package*.json ./
-RUN npm install
+RUN npm install --legacy-peer-deps --no-audit --prefer-offline || npm install --legacy-peer-deps
 
 # Copia código-fonte e compila para produção (dist/)
 COPY . .
