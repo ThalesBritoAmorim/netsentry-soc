@@ -131,6 +131,7 @@ modprobe iptable_filter 2>/dev/null || true
 modprobe iptable_nat 2>/dev/null || true
 modprobe ip_tables 2>/dev/null || true
 
+mkdir -p /etc/modules-load.d
 cat << 'EOF' > /etc/modules-load.d/netsentry.conf
 br_netfilter
 nf_conntrack
@@ -139,6 +140,7 @@ iptable_nat
 ip_tables
 EOF
 
+mkdir -p /etc/sysctl.d
 cat << 'EOF' > /etc/sysctl.d/99-netsentry.conf
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.send_redirects = 0
@@ -180,6 +182,7 @@ for bin in nmap tcpdump arping python3; do
     fi
 done
 
+mkdir -p /etc/sudoers.d
 cat << EOF > /etc/sudoers.d/netsentry
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nmap, /usr/bin/tcpdump, /usr/bin/arping, /usr/sbin/iptables, /usr/sbin/ip6tables, /usr/sbin/ip, /usr/bin/docker, /usr/bin/docker-compose, /usr/bin/nsenter, /usr/bin/systemctl, /usr/bin/kill, /bin/kill, /usr/bin/netstat, /usr/bin/ss
 EOF

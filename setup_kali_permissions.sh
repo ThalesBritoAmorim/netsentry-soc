@@ -122,11 +122,11 @@ if [ -S /var/run/docker.sock ]; then
 fi
 
 # Garante persistência das permissões do socket após reinicialização do Docker
+mkdir -p /etc/systemd/system/docker.service.d/
 cat << 'EOF' > /etc/systemd/system/docker.service.d/override.conf
 [Service]
 ExecStartPost=/bin/chmod 666 /var/run/docker.sock
 EOF
-mkdir -p /etc/systemd/system/docker.service.d/
 systemctl daemon-reload >/dev/null 2>&1 || true
 
 echo -e "${GREEN}[OK] Docker daemon operacional e socket liberado para Portainer.${NC}"
@@ -173,6 +173,7 @@ modprobe iptable_nat 2>/dev/null || true
 modprobe ip_tables 2>/dev/null || true
 
 # Persistência de módulos no boot
+mkdir -p /etc/modules-load.d
 cat << 'EOF' > /etc/modules-load.d/netsentry.conf
 br_netfilter
 nf_conntrack
@@ -182,6 +183,7 @@ ip_tables
 EOF
 
 # Parâmetros de rede no kernel (sysctl)
+mkdir -p /etc/sysctl.d
 cat << 'EOF' > /etc/sysctl.d/99-netsentry.conf
 # NetSentry SOC - Configurações de Kernel para Análise de Pacotes
 net.ipv4.ip_forward = 1
@@ -248,6 +250,7 @@ for bin in nmap tcpdump arping python3; do
 done
 
 # Permite execução transparente sem travar pedindo senha interativa no terminal web
+mkdir -p /etc/sudoers.d
 cat << EOF > /etc/sudoers.d/netsentry
 # ==============================================================================
 # NetSentry SOC - Permissões operacionais sem senha (NOPASSWD)
