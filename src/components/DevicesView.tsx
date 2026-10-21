@@ -179,12 +179,36 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 font-mono text-slate-300">
-              {filteredDevices.map((dev) => (
-                <tr 
-                  key={dev.id} 
-                  className="hover:bg-slate-800/40 transition-colors cursor-pointer"
-                  onClick={() => setSelectedDevice(dev)}
-                >
+              {filteredDevices.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center text-slate-400 font-sans">
+                    <div className="max-w-md mx-auto space-y-3">
+                      <div className="w-12 h-12 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center mx-auto text-slate-500">
+                        <Wifi className="w-6 h-6 text-cyan-400" />
+                      </div>
+                      <div className="text-sm font-semibold text-slate-200">
+                        Nenhum dispositivo encontrado na rede local
+                      </div>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        O inventário exibirá exclusivamente os dispositivos reais coletados da sua rede pelo daemon do Kali Linux (via tabela ARP, Scapy e Nmap).
+                      </p>
+                      <button
+                        onClick={onScanSubnet}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 transition-colors shadow-sm"
+                      >
+                        <Zap className="w-3.5 h-3.5" />
+                        <span>Iniciar Varredura ARP / Nmap</span>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                filteredDevices.map((dev) => (
+                  <tr 
+                    key={dev.id} 
+                    className="hover:bg-slate-800/40 transition-colors cursor-pointer"
+                    onClick={() => setSelectedDevice(dev)}
+                  >
                   <td className="py-3.5 px-4 font-sans">
                     <div className="flex items-center gap-2.5">
                       <div className="p-1.5 rounded-md bg-slate-950 border border-slate-800 shrink-0">
@@ -291,7 +315,7 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
                     </div>
                   </td>
                 </tr>
-              ))}
+              )))}
             </tbody>
           </table>
         </div>

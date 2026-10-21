@@ -196,63 +196,8 @@ export const IncidentHeatmapChart: React.FC<IncidentHeatmapChartProps> = ({
       if (alert.severity === 'high') totalHigh++;
     });
 
-    // Se o banco inicial tiver poucos alertas, adiciona histórico sintético proporcional para enriquecer o mapa de calor de ataques passados
-    // Garantindo que padrões reais sejam visualizados mesmo no primeiro carregamento
-    const historicalSeeds: { category: ThreatCategory; hour: number; count: number }[] = [
-      { category: 'port_scan', hour: 2, count: 6 },
-      { category: 'port_scan', hour: 3, count: 9 },
-      { category: 'arp_poisoning', hour: 2, count: 4 },
-      { category: 'arp_poisoning', hour: 11, count: 5 },
-      { category: 'arp_poisoning', hour: 14, count: 7 },
-      { category: 'dns_tunneling', hour: 10, count: 3 },
-      { category: 'dns_tunneling', hour: 15, count: 4 },
-      { category: 'ddos_flood', hour: 22, count: 8 },
-      { category: 'ddos_flood', hour: 23, count: 11 },
-      { category: 'rogue_device', hour: 9, count: 3 },
-      { category: 'brute_force', hour: 1, count: 5 },
-      { category: 'brute_force', hour: 4, count: 4 },
-      { category: 'c2_beaconing', hour: 18, count: 3 },
-      { category: 'anomalous_outbound', hour: 13, count: 2 }
-    ];
-
-    historicalSeeds.forEach(seed => {
-      const slot = activeTimeSlots.find(s => seed.hour >= s.start && seed.hour < s.end);
-      if (slot) {
-        const key = `${seed.category}:${slot.id}`;
-        const arr = countsMap.get(key) || [];
-        // Se ainda estiver zerado ou com poucos, semeia contagem de histórico
-        if (arr.length === 0) {
-          for (let i = 0; i < seed.count; i++) {
-            arr.push({
-              id: `hist-${seed.category}-${i}`,
-              timestamp: `${seed.hour.toString().padStart(2, '0')}:30:00`,
-              title: `Incidente Histórico: ${seed.category}`,
-              category: seed.category,
-              severity: seed.category === 'ddos_flood' || seed.category === 'arp_poisoning' ? 'critical' : 'high',
-              sourceIp: `192.168.1.${100 + i}`,
-              targetIp: '192.168.1.1',
-              protocol: 'TCP',
-              confidence: 95,
-              details: 'Registro consolidado no banco PostgreSQL',
-              status: 'mitigated',
-              playbook: {
-                id: 'pb-hist',
-                actionName: 'Mitigado',
-                description: '',
-                severity: 'high',
-                iptablesCommand: '',
-                kaliToolCommand: '',
-                automatedAvailable: true,
-                applied: true,
-                rollbackCommand: ''
-              }
-            });
-          }
-        }
-      }
-    });
-
-    // Calcular valores para o Scatter e Gráficos
+    // 100% REAL: Sem injeção de sementes fictícias ou incidentes sintéticos.
+    // Todos os dados do mapa de calor são exclusivamente os incidentes reais da rede física.
     let maxVal = 1;
     const sData: any[] = [];
     const bData: any[] = activeTimeSlots.map(slot => ({
@@ -325,19 +270,27 @@ export const IncidentHeatmapChart: React.FC<IncidentHeatmapChartProps> = ({
     });
     const topCatObj = THREAT_CATEGORIES_META.find(c => c.category === topCatKey) || THREAT_CATEGORIES_META[0];
 
-    // Diagnóstico Heurístico de Padrão
-    let patternDiagnosis = 'Padrão Distribuído de Baixo Ruído';
-    let patternDescription = 'Incidentes espalhados ao longo do dia, típico de escaneamento externo intermitente.';
-    let recommendation = 'Mantenha o daemon autônomo monitorando o tráfego e execute varredura de sub-rede periódica.';
+    const totalIncidents = Object.values(categoryTotals).reduce((a, b) => a + b, 0);
 
-    if (peakSlotObj.start >= 0 && peakSlotObj.end <= 8) {
-      patternDiagnosis = 'Campanha Noturna / Automação de Botnet';
-      patternDescription = `Pico concentrado na ${peakSlotObj.name} (${peakSlotObj.label}) com ${peakSlotCount} incidentes. Típico de bots que atacam fora do horário comercial para evitar detecção imediata.`;
-      recommendation = 'Habilitar rate-limit e drop de conexões SYN não autorizadas via iptables durante a madrugada.';
-    } else if (topCatKey === 'ddos_flood' || topCatKey === 'port_scan') {
-      patternDiagnosis = 'Varredura Agressiva & Tentativa de Evasão';
-      patternDescription = `Alta incidência de ${topCatObj.name} detectada com padrão de rajada volumétrica.`;
-      recommendation = 'Isolar o host de origem (192.168.1.240) adicionando rota blackhole no kernel do Kali Linux.';
+    // Diagnóstico Heurístico de Padrão
+    let patternDiagnosis = 'Rede Nominal (Sem Incidentes)';
+    let patternDescription = 'Nenhum incidente ou anomalia detectado na rede monitorada até o momento.';
+    let recommendation = 'Manter o sensor de pacotes Scapy ativo no Kali Linux em modo promíscuo.';
+
+    if (totalIncidents > 0) {
+      if (peakSlotObj.start >= 0 && peakSlotObj.end <= 8) {
+        patternDiagnosis = 'Campanha Noturna / Automação de Botnet';
+        patternDescription = `Pico concentrado na ${peakSlotObj.name} (${peakSlotObj.label}) com ${peakSlotCount} incidentes. Típico de bots que atacam fora do horário comercial para evitar detecção imediata.`;
+        recommendation = 'Habilitar rate-limit e drop de conexões SYN não autorizadas via iptables durante a madrugada.';
+      } else if (topCatKey === 'ddos_flood' || topCatKey === 'port_scan') {
+        patternDiagnosis = 'Varredura Agressiva & Tentativa de Evasão';
+        patternDescription = `Alta incidência de ${topCatObj.name} detectada com padrão de rajada volumétrica.`;
+        recommendation = 'Isolar o host de origem adicionando rota blackhole ou regra netfilter no kernel do Kali Linux.';
+      } else {
+        patternDiagnosis = 'Padrão Distribuído de Baixo Ruído';
+        patternDescription = 'Incidentes espalhados ao longo do dia, típico de escaneamento externo intermitente.';
+        recommendation = 'Mantenha o daemon autônomo monitorando o tráfego e execute varredura de sub-rede periódica.';
+      }
     }
 
     return {
@@ -639,7 +592,9 @@ export const IncidentHeatmapChart: React.FC<IncidentHeatmapChartProps> = ({
         </div>
 
         <p className="text-xs text-slate-400 leading-relaxed">
-          {stats.patternDescription} Vetor predominante: <strong className="text-slate-200">{stats.topCategory.name}</strong> ({stats.topCategoryCount} ocorrências).
+          {stats.patternDescription} {stats.totalIncidents > 0 && (
+            <>Vetor predominante: <strong className="text-slate-200">{stats.topCategory.name}</strong> ({stats.topCategoryCount} ocorrências).</>
+          )}
         </p>
 
         <div className="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-emerald-300 font-mono flex items-center gap-2">

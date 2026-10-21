@@ -225,13 +225,28 @@ export const TrafficLogsView: React.FC<TrafficLogsViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-slate-300">
-              {filteredFlows.map((flow) => (
-                <tr 
-                  key={flow.id} 
-                  className={`hover:bg-slate-800/40 transition-colors ${
-                    flow.isSuspicious ? 'bg-rose-950/20 text-rose-200' : ''
-                  }`}
-                >
+              {filteredFlows.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center text-slate-400 font-sans">
+                    <div className="max-w-md mx-auto space-y-2">
+                      <Activity className="w-8 h-8 text-cyan-400 mx-auto" />
+                      <div className="text-sm font-semibold text-slate-200">
+                        Nenhum pacote capturado na rede ainda
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        O sniffer Scapy em modo promíscuo no Kali Linux está monitorando a interface física. Os fluxos e protocolos aparecerão aqui automaticamente conforme forem transmitidos na sua rede local.
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                filteredFlows.map((flow) => (
+                  <tr 
+                    key={flow.id} 
+                    className={`hover:bg-slate-800/40 transition-colors ${
+                      flow.isSuspicious ? 'bg-rose-950/20 text-rose-200' : ''
+                    }`}
+                  >
                   <td className="py-2 px-3 text-slate-400 whitespace-nowrap">
                     {flow.timestamp}
                   </td>
@@ -280,7 +295,7 @@ export const TrafficLogsView: React.FC<TrafficLogsViewProps> = ({
                     )}
                   </td>
                 </tr>
-              ))}
+              )))}
             </tbody>
           </table>
         </div>

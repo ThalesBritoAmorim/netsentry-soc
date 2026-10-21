@@ -65,39 +65,32 @@ export const NetworkTrafficChart: React.FC<NetworkTrafficChartProps> = ({
 
   const primaryIface = metrics.sniffingInterface || 'eth0';
 
-  // Seed initial telemetry buffer
+  // 100% REAL: Inicializa buffer com dados reais do sensor
   useEffect(() => {
     const initialPoints: TrafficDataPoint[] = [];
     const now = Date.now();
-    for (let i = 24; i >= 0; i--) {
+    const currentBps = Math.round((metrics.bandwidthKbps || 0) * 1024 * 8);
+    const currentPps = metrics.pps || 0;
+
+    for (let i = 15; i >= 0; i--) {
       const pointTime = new Date(now - i * 2000);
       const timeStr = pointTime.toLocaleTimeString('pt-BR', { hour12: false });
       
-      const baseEth0 = Math.floor(Math.random() * 250000) + 400000; // ~400kbps - 650kbps
-      const baseWlan0 = Math.floor(Math.random() * 120000) + 100000;
-      const baseDocker0 = Math.floor(Math.random() * 50000) + 40000;
-
-      // Seed a simulated past anomaly spike around 14 steps ago
-      const isSpike = i === 12;
-      const eth0Spike = isSpike ? baseEth0 * 4.5 : baseEth0;
-
       initialPoints.push({
         time: timeStr,
         timestamp: pointTime.getTime(),
-        eth0Bps: eth0Spike,
-        wlan0Bps: baseWlan0,
-        docker0Bps: baseDocker0,
-        totalBps: eth0Spike + baseWlan0 + baseDocker0,
-        hasAnomaly: isSpike,
-        anomalyTitle: isSpike ? 'Pico de Anomalia: Varredura de Portas SYN' : undefined,
-        anomalySeverity: isSpike ? 'high' : undefined,
-        pps: isSpike ? 820 : Math.floor(Math.random() * 40) + 90
+        eth0Bps: currentBps,
+        wlan0Bps: 0,
+        docker0Bps: 0,
+        totalBps: currentBps,
+        hasAnomaly: false,
+        pps: currentPps
       });
     }
     setDataPoints(initialPoints);
   }, []);
 
-  // Update real-time feed with live props
+  // Atualização em tempo real sincronizada com as métricas reais do Scapy / Kali
   useEffect(() => {
     if (isLivePaused) return;
 
@@ -105,15 +98,12 @@ export const NetworkTrafficChart: React.FC<NetworkTrafficChartProps> = ({
       const now = new Date();
       const timeStr = now.toLocaleTimeString('pt-BR', { hour12: false });
 
-      // Convert metrics.bandwidthKbps into bps
-      const currentKbps = metrics.bandwidthKbps > 0 ? metrics.bandwidthKbps : (Math.random() * 150 + 450);
-      const currentEth0Bps = Math.round(currentKbps * 1024 * 8);
+      // Telemetria real em bps
+      const realKbps = metrics.bandwidthKbps || 0;
+      const realEth0Bps = Math.round(realKbps * 1024 * 8);
+      const realTotalBps = realEth0Bps;
 
-      // Wireless and docker bridge variation
-      const currentWlan0Bps = Math.round((currentKbps * 0.25 + (Math.random() * 50 - 25)) * 1024 * 8);
-      const currentDocker0Bps = Math.round((currentKbps * 0.15 + (Math.random() * 30 - 15)) * 1024 * 8);
-
-      // Detect if there is an active anomaly spike right now
+      // Detecção de anomalia ativa real (não sintética)
       const recentUnmitigated = alerts.find(a => 
         a.status === 'active' && 
         (a.severity === 'critical' || a.severity === 'high')
@@ -125,21 +115,18 @@ export const NetworkTrafficChart: React.FC<NetworkTrafficChartProps> = ({
         : metrics.pps > 600 ? 'Surto Anômalo de Tráfego (>600 PPS)' : undefined;
       const anomalySeverity = recentUnmitigated?.severity || (metrics.pps > 600 ? 'critical' : undefined);
 
-      const finalEth0 = isAnomalySpike ? Math.max(currentEth0Bps, 4800000) : currentEth0Bps;
-      const total = finalEth0 + Math.max(0, currentWlan0Bps) + Math.max(0, currentDocker0Bps);
-
       setDataPoints(prev => {
         const nextPoint: TrafficDataPoint = {
           time: timeStr,
           timestamp: now.getTime(),
-          eth0Bps: Math.max(10000, finalEth0),
-          wlan0Bps: Math.max(5000, currentWlan0Bps),
-          docker0Bps: Math.max(2000, currentDocker0Bps),
-          totalBps: total,
+          eth0Bps: realEth0Bps,
+          wlan0Bps: 0,
+          docker0Bps: 0,
+          totalBps: realTotalBps,
           hasAnomaly: isAnomalySpike,
           anomalyTitle,
           anomalySeverity,
-          pps: metrics.pps || Math.floor(Math.random() * 30) + 110
+          pps: metrics.pps || 0
         };
 
         const slice = prev.length >= 30 ? prev.slice(1) : prev;

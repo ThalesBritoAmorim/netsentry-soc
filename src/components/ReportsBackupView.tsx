@@ -77,7 +77,28 @@ export const ReportsBackupView: React.FC<ReportsBackupViewProps> = ({
     const totalAlerts = alerts.length;
     const criticalAlerts = alerts.filter(a => a.severity === 'critical').length;
     const mitigatedAlerts = alerts.filter(a => a.playbook.applied).length;
-    const avgScore = Math.round(devices.reduce((acc, d) => acc + d.threatScore, 0) / devices.length);
+    const avgScore = devices.length > 0 
+      ? Math.round(devices.reduce((acc, d) => acc + d.threatScore, 0) / devices.length) 
+      : 0;
+
+    const actionPlan: string[] = [];
+    alerts.forEach(a => {
+      if (!a.playbook.applied) {
+        actionPlan.push(`Aplicar mitigação recomendada para ${a.title} (${a.sourceIp}): ${a.playbook.actionName}.`);
+      } else {
+        actionPlan.push(`Manter regra de firewall ativa para ${a.sourceIp} (${a.playbook.actionName}).`);
+      }
+    });
+    devices.filter(d => d.openPorts.some(p => p.risk === 'critical' || p.risk === 'high')).forEach(d => {
+      const riskyPorts = d.openPorts.filter(p => p.risk === 'critical' || p.risk === 'high').map(p => `${p.port}/${p.service}`).join(', ');
+      actionPlan.push(`Revisar e restringir portas de alto risco no host ${d.hostname} (${d.ip}): ${riskyPorts}.`);
+    });
+
+    if (actionPlan.length === 0) {
+      actionPlan.push('Manter o sensor de tráfego Scapy ativo em modo promíscuo no Kali Linux.');
+      actionPlan.push('Executar varredura de sub-rede periódica (ARP/Nmap) para catalogação contínua de novos ativos.');
+      actionPlan.push('Garantir que as regras de mitigação autônoma permaneçam habilitadas no kernel Netfilter.');
+    }
 
     const report: SecurityReport = {
       id: `rep-${Date.now()}`,
@@ -85,18 +106,13 @@ export const ReportsBackupView: React.FC<ReportsBackupViewProps> = ({
       generatedAt: new Date().toLocaleString('pt-BR'),
       author: 'Thales Brito Amorim (SecOps Admin)',
       period: 'Últimas 24 Horas',
-      summary: `Durante o período de monitoramento, foram inspecionados ${devices.length} dispositivos na sub-rede. O sistema autônomo NetSentry identificou ${totalAlerts} incidentes anômalos, dos quais ${mitigatedAlerts} foram mitigados com regras de netfilter do kernel Linux. A postura média de risco da infraestrutura encontra-se em ${avgScore}/100.`,
+      summary: `Durante o período de monitoramento, foram inspecionados ${devices.length} dispositivos reais na rede local. O sistema autônomo NetSentry identificou ${totalAlerts} incidentes anômalos, dos quais ${mitigatedAlerts} foram mitigados com regras de netfilter do kernel Linux. A postura média de risco da infraestrutura encontra-se em ${avgScore}/100.`,
       totalAlerts,
       criticalAlerts,
       mitigatedAlerts,
       devicesScanned: devices.length,
       threatScoreAverage: avgScore,
-      executiveActionPlan: [
-        'Desativar o serviço Telnet (porta 23) no dispositivo IoT 192.168.1.189 e migrar para SSHv2/HTTPS.',
-        'Manter regras ativas de bloqueio de MAC para o dispositivo 192.168.1.240 devido a tentativas de ARP Poisoning.',
-        'Revisar limites de taxa de pacotes SYN nos servidores centrais para amortecimento contínuo de varreduras Nmap.',
-        'Impor resolução DNS obrigatória pelo resolver interno seguro para mitigar riscos de tunelamento DNS.'
-      ]
+      executiveActionPlan: actionPlan
     };
     setReportGenerated(report);
   };

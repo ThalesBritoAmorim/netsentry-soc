@@ -10,6 +10,10 @@ export default defineConfig(() => {
       alias: {
         '@': path.resolve('.'),
       },
+      dedupe: ['react', 'react-dom', 'react-is'],
+    },
+    optimizeDeps: {
+      include: ['react', 'react-dom', 'react-is', 'recharts'],
     },
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',

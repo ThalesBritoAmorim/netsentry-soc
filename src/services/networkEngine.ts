@@ -191,50 +191,8 @@ class NetworkEngine {
 
   private startStreaming() {
     if (this.streamInterval) clearInterval(this.streamInterval);
-    this.streamInterval = setInterval(() => {
-      if (!this.state.isStreaming || this.state.metrics.isLiveKaliConnected) return;
-      this.generateLiveTick();
-    }, 2500);
-  }
-
-  private generateLiveTick() {
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('pt-BR');
-
-    // Generate normal traffic variation
-    const protocols: Array<'TCP' | 'UDP' | 'TLS' | 'DNS' | 'HTTP' | 'ICMP'> = ['TCP', 'TLS', 'UDP', 'DNS', 'HTTP', 'ICMP'];
-    const proto = protocols[Math.floor(Math.random() * protocols.length)];
-    const devices = this.state.devices.filter(d => d.trustLevel !== 'blocked');
-    const src = devices[Math.floor(Math.random() * devices.length)] || devices[0];
-    const dst = devices[Math.floor(Math.random() * devices.length)] || devices[1];
-
-    const length = Math.floor(Math.random() * 900) + 64;
-    const newFlow: TrafficFlow = {
-      id: `fl-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      timestamp: timeStr,
-      protocol: proto,
-      srcIp: src.ip,
-      srcPort: Math.floor(Math.random() * 40000) + 1024,
-      dstIp: dst.ip,
-      dstPort: proto === 'DNS' ? 53 : proto === 'HTTP' ? 80 : proto === 'TLS' ? 443 : 22,
-      packetLength: length,
-      flags: proto === 'TCP' ? 'ACK, PSH' : undefined,
-      info: `${proto} normal payload transfer (${length} bytes)`,
-      isSuspicious: false
-    };
-
-    // Update state
-    this.state.trafficFlows = [newFlow, ...this.state.trafficFlows.slice(0, 49)];
-    this.state.metrics.totalPackets += Math.floor(Math.random() * 18) + 4;
-    this.state.metrics.pps = Math.floor(Math.random() * 50) + 110;
-    this.state.metrics.bandwidthKbps = Math.round((Math.random() * 300 + 700) * 10) / 10;
-
-    // Increment byte counters on devices
-    src.txBytes += length;
-    dst.rxBytes += length;
-    src.lastSeen = 'Agora';
-
-    this.notify();
+    // 100% REAL: Desativada geração de dados sintéticos fictícios.
+    // Todos os fluxos, métricas e dispositivos são coletados exclusivamente do agente Scapy/Kali.
   }
 
   // --- Attack Simulator ---

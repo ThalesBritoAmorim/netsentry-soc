@@ -37,7 +37,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <header className="border-b border-slate-800 bg-slate-950/90 backdrop-blur-md sticky top-0 z-40">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="max-w-[1600px] mx-auto px-3 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between gap-8 h-16">
           {/* Zone 1: Single Brand Wordmark Element */}
           <div className="flex items-center gap-3 shrink-0">
