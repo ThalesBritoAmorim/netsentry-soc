@@ -36,9 +36,11 @@ const DOCKERFILE_CODE = `# =====================================================
 # Constrói o frontend React + Tailwind + Recharts e serve via Nginx de alta performance
 # ==============================================================================
 
-# Etapa 1: Build da Aplicação React / Vite (Exata do Preview)
-FROM node:20-alpine AS builder
+# Etapa 1: Build da Aplicação React / Vite (Debian Bookworm Slim para 100% de compatibilidade com Kali e glibc)
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
+
+ENV NODE_OPTIONS="--max-old-space-size=2048"
 
 # Copia dependências e instala com compatibilidade para React 19
 COPY package*.json ./
@@ -96,8 +98,143 @@ server {
 }
 `;
 
+const SETUP_PERMISSIONS_SCRIPT = `#!/usr/bin/env bash
+# ==============================================================================
+# NetSentry SOC - Script Definitivo de Permissões para Kali Linux & Portainer
+# Concede permissões totais para Docker, Portainer, Kernel Netfilter, Scapy e Nmap
+# ==============================================================================
+set -e
+
+RED='\\033[0;31m'
+GREEN='\\033[0;32m'
+CYAN='\\033[0;36m'
+YELLOW='\\033[1;33m'
+BOLD='\\033[1m'
+NC='\\033[0m'
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "\${YELLOW}[!] Privilégios de root necessários. Elevando com sudo...\${NC}"
+    exec sudo bash "$0" "$@"
+fi
+
+TARGET_USER="\${SUDO_USER:-\$USER}"
+[ "$TARGET_USER" = "root" ] && id "kali" >/dev/null 2>&1 && TARGET_USER="kali"
+echo -e "\${CYAN}[INFO]\${NC} Configurando permissões totais para o usuário: \${BOLD}\$TARGET_USER\${NC}"
+
+# 1. Ferramentas essenciais no Kali
+apt-get update -qq || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \\
+    docker.io docker-compose-v2 iptables iproute2 tcpdump nmap arping net-tools iputils-ping util-linux procps curl wget git libcap2-bin kmod python3 python3-pip
+
+# 2. Permissões de Docker e Socket para o Portainer
+groupadd -f docker
+usermod -aG docker "$TARGET_USER"
+systemctl enable --now docker
+if [ -S /var/run/docker.sock ]; then
+    chmod 666 /var/run/docker.sock
+    chown root:docker /var/run/docker.sock
+fi
+
+mkdir -p /etc/systemd/system/docker.service.d/
+cat << 'EOF' > /etc/systemd/system/docker.service.d/override.conf
+[Service]
+ExecStartPost=/bin/chmod 666 /var/run/docker.sock
+EOF
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+# 3. Portainer CE (inicia se não existir)
+if ! docker ps -a --format '{{.Names}}' | grep -Eq "^portainer$"; then
+    docker volume create portainer_data >/dev/null 2>&1 || true
+    docker run -d -p 8000:8000 -p 9000:9000 -p 9443:9443 --name portainer --restart=always \\
+        -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer-ce:latest || true
+fi
+
+# 4. Módulos de Kernel & Roteamento IPv4
+modprobe br_netfilter nf_conntrack iptable_filter iptable_nat ip_tables 2>/dev/null || true
+cat << 'EOF' > /etc/modules-load.d/netsentry.conf
+br_netfilter
+nf_conntrack
+iptable_filter
+iptable_nat
+ip_tables
+EOF
+
+cat << 'EOF' > /etc/sysctl.d/99-netsentry.conf
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.send_redirects = 0
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+sysctl --system -q || true
+
+# 5. Modo Promíscuo na Placa de Rede
+IFACE=$(ip route show default 2>/dev/null | awk '{print $5}' | head -n 1)
+IFACE=\${IFACE:-eth0}
+ip link set "$IFACE" promisc on || true
+
+cat << EOF > /etc/systemd/system/netsentry-promisc.service
+[Unit]
+Description=NetSentry SOC - Modo Promiscuo em $IFACE
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip link set $IFACE promisc on
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable netsentry-promisc.service >/dev/null 2>&1 || true
+
+# 6. Capabilities Linux para Nmap, Tcpdump, Arping e Python (Raw Sockets)
+for bin in nmap tcpdump arping python3; do
+    p=$(which $bin 2>/dev/null || true)
+    [ -n "$p" ] && setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip "$p" 2>/dev/null || true
+done
+
+# 7. Sudoers sem senha para automação do NetSentry
+cat << EOF > /etc/sudoers.d/netsentry
+$TARGET_USER ALL=(ALL) NOPASSWD: /usr/bin/nmap, /usr/bin/tcpdump, /usr/bin/arping, /usr/sbin/iptables, /usr/sbin/ip6tables, /usr/sbin/ip, /usr/bin/docker, /usr/bin/docker-compose, /usr/bin/nsenter, /usr/bin/systemctl, /usr/bin/kill, /bin/kill, /usr/bin/netstat, /usr/bin/ss
+EOF
+chmod 0440 /etc/sudoers.d/netsentry
+
+# 8. Firewall: liberar portas 3000, 8080, 5432, 9000, 9443
+if command -v ufw >/dev/null 2>&1; then
+    ufw allow 3000/tcp >/dev/null 2>&1 || true
+    ufw allow 8080/tcp >/dev/null 2>&1 || true
+    ufw allow 5432/tcp >/dev/null 2>&1 || true
+    ufw allow 9000/tcp >/dev/null 2>&1 || true
+    ufw allow 9443/tcp >/dev/null 2>&1 || true
+fi
+iptables -I INPUT -p tcp -m multiport --dports 3000,8080,5432,9000,9443 -j ACCEPT 2>/dev/null || true
+
+# 9. Swap de 2GB se RAM for baixa (previne exit code 1 no docker build)
+MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
+if [ "$MEM_MB" -lt 3000 ] && [ ! -f /swapfile_netsentry ]; then
+    fallocate -l 2G /swapfile_netsentry 2>/dev/null || dd if=/dev/zero of=/swapfile_netsentry bs=1M count=2048
+    chmod 600 /swapfile_netsentry
+    mkswap /swapfile_netsentry >/dev/null 2>&1 || true
+    swapon /swapfile_netsentry >/dev/null 2>&1 || true
+    echo "/swapfile_netsentry none swap sw 0 0" >> /etc/fstab
+fi
+
+mkdir -p /opt/netsentry /var/log/netsentry
+chown -R "$TARGET_USER":"$TARGET_USER" /opt/netsentry /var/log/netsentry 2>/dev/null || true
+chmod -R 775 /opt/netsentry /var/log/netsentry
+
+echo -e "\${GREEN}\${BOLD}"
+echo "=========================================================================="
+echo "✅ TODAS AS PERMISSÕES FORAM APLICADAS COM SUCESSO NO KALI LINUX!"
+echo "=========================================================================="
+echo -e "\${NC}"
+echo -e "Rode agora no seu terminal para aplicar o grupo docker: \${BOLD}newgrp docker\${NC}"
+echo -e "Para subir o stack: \${BOLD}docker compose down && docker compose up -d --build\${NC}"
+`;
+
 export const PortainerDeployView: React.FC = () => {
-  const [activeCodeTab, setActiveCodeTab] = useState<'quickstart' | 'compose' | 'dockerfile' | 'nginx' | 'python' | 'sql' | 'kali'>('quickstart');
+  const [activeCodeTab, setActiveCodeTab] = useState<'quickstart' | 'permissions' | 'compose' | 'dockerfile' | 'nginx' | 'python' | 'sql' | 'kali'>('quickstart');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [isDownloadingZip, setIsDownloadingZip] = useState<boolean>(false);
   const [zipSuccess, setZipSuccess] = useState<boolean>(false);
@@ -135,6 +272,7 @@ export const PortainerDeployView: React.FC = () => {
   const getActiveCode = () => {
     switch (activeCodeTab) {
       case 'quickstart': return ALL_IN_ONE_QUICKSTART_SCRIPT;
+      case 'permissions': return SETUP_PERMISSIONS_SCRIPT;
       case 'compose': return DOCKER_COMPOSE_YML;
       case 'dockerfile': return DOCKERFILE_CODE;
       case 'nginx': return NGINX_CONF_CODE;
@@ -147,6 +285,7 @@ export const PortainerDeployView: React.FC = () => {
   const getActiveFilename = () => {
     switch (activeCodeTab) {
       case 'quickstart': return 'deploy_all.sh';
+      case 'permissions': return 'setup_kali_permissions.sh';
       case 'compose': return 'docker-compose.yml';
       case 'dockerfile': return 'Dockerfile';
       case 'nginx': return 'nginx.conf';
@@ -518,6 +657,16 @@ export const PortainerDeployView: React.FC = () => {
         {/* Tabs Bar */}
         <div className="px-4 py-3 bg-slate-950 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-1 overflow-x-auto text-xs">
+            <button
+              onClick={() => setActiveCodeTab('permissions')}
+              className={`px-3 py-1.5 rounded-md font-medium transition-colors ${
+                activeCodeTab === 'permissions'
+                  ? 'bg-amber-950 text-amber-300 border border-amber-800 shadow-sm font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              🛡️ setup_kali_permissions.sh (Permissões Totais)
+            </button>
             <button
               onClick={() => setActiveCodeTab('quickstart')}
               className={`px-3 py-1.5 rounded-md font-medium transition-colors ${

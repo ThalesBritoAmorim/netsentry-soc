@@ -8,7 +8,9 @@ const sourceFiles = import.meta.glob([
   '/vite.config.ts',
   '/tsconfig.json',
   '/Dockerfile',
-  '/nginx.conf'
+  '/nginx.conf',
+  '/setup_kali_permissions.sh',
+  '/daemon_monitor.py'
 ], { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
 // Arquivos adicionais de infraestrutura para o Portainer / Kali Linux
