@@ -123,8 +123,18 @@ echo -e "\${CYAN}[INFO]\${NC} Configurando permissões totais para o usuário: \
 
 # 1. Ferramentas essenciais no Kali
 apt-get update -qq || true
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \\
-    docker.io docker-compose-v2 iptables iproute2 tcpdump nmap arping net-tools iputils-ping util-linux procps curl wget git libcap2-bin kmod python3 python3-pip
+PKGS=(docker.io docker-compose-plugin docker-compose iptables iproute2 tcpdump nmap arping net-tools iputils-ping util-linux procps curl wget git libcap2-bin kmod python3 python3-pip python3-venv libpcap-dev build-essential)
+for pkg in "\${PKGS[@]}"; do
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$pkg" 2>/dev/null || true
+done
+if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+    mkdir -p /usr/local/lib/docker/cli-plugins /usr/local/bin
+    ARCH=$(uname -m)
+    [ "$ARCH" = "x86_64" ] && COMPOSE_ARCH="x86_64" || COMPOSE_ARCH="$ARCH"
+    curl -sSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$COMPOSE_ARCH" -o /usr/local/lib/docker/cli-plugins/docker-compose 2>/dev/null || true
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose 2>/dev/null || true
+    ln -sf /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose 2>/dev/null || true
+fi
 
 # 2. Permissões de Docker e Socket para o Portainer
 groupadd -f docker

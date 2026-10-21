@@ -103,7 +103,7 @@ echo "=== [NetSentry] 1. Verificando pré-requisitos no Kali Linux ==="
 if ! command -v docker &> /dev/null; then
     echo "Docker não encontrado. Instalando docker.io e docker-compose..."
     sudo apt-get update
-    sudo apt-get install -y docker.io docker-compose-v2
+    sudo apt-get install -y docker.io docker-compose-plugin 2>/dev/null || sudo apt-get install -y docker.io docker-compose 2>/dev/null || sudo apt-get install -y docker.io || true
     sudo systemctl enable --now docker
 fi
 
