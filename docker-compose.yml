@@ -1,0 +1,82 @@
+version: '3.8'
+
+# ==============================================================================
+# NetSentry SOC - Portainer & Docker Stack para Kali Linux (GitHub Sync Ready)
+# 100% LOCAL: PostgreSQL 16 + Sniffer Scapy + Agente Kali + Frontend React Produção
+# ==============================================================================
+
+services:
+  # 1. Banco de Dados Relacional PostgreSQL 16
+  postgres:
+    image: postgres:16-alpine
+    container_name: netsentry-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: netsentry_db
+      POSTGRES_USER: netsentry_admin
+      POSTGRES_PASSWORD: SecOps_Kali_2026!Strong
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netsentry_admin -d netsentry_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 2. Daemon Python Autônomo com API REST & Sniffer Scapy (Modo Host Privilegiado)
+  daemon:
+    image: python:3.12-slim-bookworm
+    container_name: netsentry-daemon
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    privileged: true
+    cap_add:
+      - ALL
+    volumes:
+      - /:/host:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /dev:/dev
+      - /run:/run
+      - ./daemon_monitor.py:/daemon.py:ro
+    environment:
+      - SNIFF_INTERFACE=eth0
+      - API_PORT=8080
+      - DB_HOST=127.0.0.1
+      - DB_PORT=5432
+      - DB_NAME=netsentry_db
+      - DB_USER=netsentry_admin
+      - DB_PASSWORD=SecOps_Kali_2026!Strong
+      - AUTONOMOUS_MITIGATION=true
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        echo "[NetSentry] 1. Instalando dependencias de rede no contêiner..."
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends libpcap-dev gcc iptables iproute2 tcpdump arping nmap net-tools iputils-ping util-linux procps sudo curl
+        pip install -q --no-cache-dir scapy psycopg2-binary
+        echo "[NetSentry] 2. Iniciando Daemon Scapy com API REST na porta 8080..."
+        python3 -u /daemon.py
+    depends_on:
+      - postgres
+
+  # 3. Interface Web Completa (Exata do Preview do AI Studio com Nginx)
+  web-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: netsentry-soc-frontend:latest
+    container_name: netsentry-web
+    restart: unless-stopped
+    network_mode: host
+    ports:
+      - "3000:3000"
+    depends_on:
+      - daemon
+
+volumes:
+  postgres_data:
