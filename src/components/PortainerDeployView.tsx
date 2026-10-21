@@ -44,7 +44,7 @@ ENV NODE_OPTIONS="--max-old-space-size=2048"
 
 # Copia dependências e instala com compatibilidade para React 19
 COPY package*.json ./
-RUN npm install --legacy-peer-deps
+RUN npm install react-is --save --legacy-peer-deps && npm install --legacy-peer-deps
 
 # Copia código-fonte e compila para produção (dist/)
 COPY . .

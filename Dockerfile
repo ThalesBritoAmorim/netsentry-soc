@@ -3,12 +3,16 @@
 # ==============================================================================
 
 # Etapa 1: Build da Aplicação React / Vite
-FROM node:20-alpine AS builder
+# ATENÇÃO: É obrigatório usar Debian Bookworm Slim (glibc), pois o Vite 8 / Rolldown
+# é compilado em Rust com glibc nativa e falha no Alpine (musl).
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 
-# Copia dependências e instala com compatibilidade para React 19
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+
+# Copia dependências e instala (garante react-is exigido pelo Recharts)
 COPY package*.json ./
-RUN npm install --legacy-peer-deps
+RUN npm install react-is --save --legacy-peer-deps && npm install --legacy-peer-deps
 
 # Copia código-fonte e compila para produção (dist/)
 COPY . .
