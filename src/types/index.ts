@@ -41,6 +41,8 @@ export interface NetworkDevice {
   lastSeen: string;
   isOnline: boolean;
   notes?: string;
+  discoveryMethod?: 'dns' | 'netbios' | 'mdns' | 'dhcp' | 'arp' | 'manual';
+  customAlias?: string;
 }
 
 export interface MitigationPlaybook {

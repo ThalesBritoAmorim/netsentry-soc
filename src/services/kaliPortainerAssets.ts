@@ -67,11 +67,11 @@ services:
 
         echo "[NetSentry] 2. Criando daemon_monitor.py com Agente Executor do Kali Linux..."
         cat << 'EOF' > /daemon.py
-        import os, sys, time, subprocess, logging, json, threading
+        import os, sys, time, subprocess, logging, json, threading, socket, re
         from collections import defaultdict, deque
         from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
         import psycopg2
-        from scapy.all import sniff, ARP, IP, TCP, UDP, DNS, Ether, srp
+        from scapy.all import sniff, ARP, IP, TCP, UDP, DNS, Ether, srp, BOOTP, DHCP
 
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [NetSentry]: %(message)s")
 
@@ -97,6 +97,113 @@ services:
         except Exception:
             pass
 
+        # OUI Vendor Database
+        OUI_TABLE = {
+            'b8:27:eb': 'Raspberry Pi Foundation',
+            'dc:a6:32': 'Raspberry Pi Foundation',
+            'e4:5f:01': 'Raspberry Pi Foundation',
+            '28:cd:c1': 'Raspberry Pi Foundation',
+            '00:1c:42': 'Parallels / VM',
+            '00:50:56': 'VMware ESXi / Workstation',
+            '00:0c:29': 'VMware Workstation',
+            '08:00:27': 'Oracle VirtualBox',
+            '52:54:00': 'QEMU / KVM Host',
+            '00:15:5d': 'Microsoft Hyper-V',
+            '00:1a:2b': 'Apple Inc.',
+            '3c:22:fb': 'Apple Inc. (iPhone/Mac)',
+            'b0:be:76': 'Apple Inc.',
+            'd8:bb:2c': 'Apple Inc.',
+            'f8:1e:df': 'Apple Inc.',
+            '18:67:b0': 'Samsung Electronics',
+            '24:4b:fe': 'Samsung Electronics',
+            '30:07:4d': 'Samsung Galaxy',
+            'ec:71:db': 'Samsung Electronics',
+            '24:0a:c4': 'Espressif (ESP32 IoT)',
+            '30:ae:a4': 'Espressif Systems',
+            '84:f3:eb': 'Espressif (NodeMCU IoT)',
+            '50:c7:bf': 'TP-Link Technologies',
+            '1c:3b:f3': 'TP-Link Archer / Deco',
+            '54:af:97': 'TP-Link Technologies',
+            '70:4f:57': 'TP-Link Technologies',
+            '98:da:c4': 'TP-Link Technologies',
+            '00:0c:e7': 'Cisco Systems',
+            '00:1e:67': 'Intel Corporate',
+            '00:14:22': 'Dell Inc.',
+            '18:03:73': 'Dell Inc.',
+            '00:1e:0b': 'HP Inc.',
+            '00:11:32': 'Synology NAS',
+            '00:08:9b': 'QNAP NAS',
+            '44:65:0d': 'Amazon Echo / FireTV',
+            '70:ee:50': 'Google Nest / Chromecast',
+            '94:eb:cd': 'Google LLC',
+            '78:11:dc': 'Xiaomi Communications',
+            '64:cc:2e': 'Xiaomi Smart Home',
+            '10:bf:48': 'ASUSTeK Computer',
+            '04:d9:f5': 'ASUSTeK Computer'
+        }
+
+        def get_vendor(mac):
+            if not mac: return 'Desconhecido'
+            p = mac.lower()[:8]
+            return OUI_TABLE.get(p, 'Dispositivo de Rede IEEE')
+
+        # Caches de resolucao
+        dhcp_names = {}
+        resolved_hosts = {}
+
+        def query_netbios_name(ip):
+            try:
+                query = b'\x80\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00 CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00\x00!\x00\x01'
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(0.7)
+                sock.sendto(query, (ip, 137))
+                data, _ = sock.recvfrom(1024)
+                sock.close()
+                if len(data) > 57:
+                    num_names = data[56]
+                    if num_names > 0:
+                        raw_name = data[57:57+15].decode('latin1', errors='ignore').strip()
+                        clean_name = ''.join(c for c in raw_name if c.isalnum() or c in '-_')
+                        if clean_name and len(clean_name) >= 2:
+                            return clean_name
+            except Exception:
+                pass
+            return None
+
+        def query_reverse_dns(ip):
+            try:
+                host, _, _ = socket.gethostbyaddr(ip)
+                if host and host != ip:
+                    return host
+            except Exception:
+                pass
+            return None
+
+        def resolve_device_identity(ip, mac, suggested_name=None):
+            if suggested_name and not suggested_name.startswith('host-') and suggested_name != 'unknown-host':
+                return suggested_name, 'dns'
+            if ip in dhcp_names:
+                return dhcp_names[ip], 'dhcp'
+            if mac in dhcp_names:
+                return dhcp_names[mac], 'dhcp'
+            if ip in resolved_hosts:
+                return resolved_hosts[ip]
+            # Tenta NetBIOS (muito efetivo para Windows e Samba)
+            nb = query_netbios_name(ip)
+            if nb:
+                resolved_hosts[ip] = (nb, 'netbios')
+                return nb, 'netbios'
+            # Tenta Reverse DNS (PTR)
+            rdns = query_reverse_dns(ip)
+            if rdns:
+                resolved_hosts[ip] = (rdns, 'dns')
+                return rdns, 'dns'
+            # Heuristica de Gateway
+            if ip.endswith('.1'):
+                return 'gateway.local (Roteador)', 'dhcp'
+            fallback = f"host-{ip.split('.')[-1]}"
+            return fallback, 'arp'
+
         conn = None
         def init_db():
             global conn
@@ -121,6 +228,8 @@ services:
                                 rx_bytes BIGINT DEFAULT 0,
                                 tx_bytes BIGINT DEFAULT 0,
                                 is_online BOOLEAN DEFAULT TRUE,
+                                discovery_method VARCHAR(32) DEFAULT 'arp',
+                                custom_alias VARCHAR(128),
                                 first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                             );
@@ -214,6 +323,29 @@ services:
             proto = "ETH"
             info = "Pacote Camada 2"
 
+            # Inspecao DHCP Option 12 (Nome do dispositivo explicitamente anunciado)
+            if pkt.haslayer(DHCP):
+                try:
+                    for opt in pkt[DHCP].options:
+                        if isinstance(opt, tuple) and opt[0] == 'hostname':
+                            val = opt[1]
+                            hname = val.decode('utf-8', errors='ignore') if isinstance(val, bytes) else str(val)
+                            if hname:
+                                client_mac = getattr(pkt, 'src', '')
+                                client_ip = pkt[IP].src if pkt.haslayer(IP) else ''
+                                if client_mac: dhcp_names[client_mac] = hname
+                                if client_ip: dhcp_names[client_ip] = hname
+                                logging.info(f"💡 Hostname DHCP detectado: {hname} ({client_ip} / {client_mac})")
+                                if conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("""
+                                            UPDATE network_devices 
+                                            SET hostname = %s, discovery_method = 'dhcp' 
+                                            WHERE (ip = %s OR mac = %s) AND custom_alias IS NULL;
+                                        """, (hname, client_ip, client_mac))
+                except Exception:
+                    pass
+
             if pkt.haslayer(ARP):
                 arp = pkt[ARP]
                 src_ip, src_mac = arp.psrc, arp.hwsrc
@@ -237,13 +369,23 @@ services:
 
                 arp_cache[src_ip] = src_mac
 
+                # Identifica e cadastra dispositivo
                 try:
+                    hname, method = resolve_device_identity(src_ip, src_mac)
+                    vendor = get_vendor(src_mac)
+                    dtype = "gateway" if src_ip.endswith(".1") else "workstation"
                     with conn.cursor() as cur:
                         cur.execute("""
-                            INSERT INTO network_devices (id, ip, mac, hostname, is_online, last_seen)
-                            VALUES (%s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
-                            ON CONFLICT (ip) DO UPDATE SET last_seen = CURRENT_TIMESTAMP, is_online = TRUE;
-                        """, (f"dev-{src_ip.replace('.', '-')}", src_ip, src_mac, f"host-{src_ip.split('.')[-1]}"))
+                            INSERT INTO network_devices (id, ip, mac, hostname, vendor, device_type, discovery_method, is_online, last_seen)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                            ON CONFLICT (ip) DO UPDATE SET 
+                                last_seen = CURRENT_TIMESTAMP, 
+                                is_online = TRUE,
+                                vendor = CASE WHEN network_devices.vendor = 'Desconhecido' THEN EXCLUDED.vendor ELSE network_devices.vendor END,
+                                hostname = CASE WHEN network_devices.custom_alias IS NOT NULL THEN network_devices.hostname 
+                                                WHEN network_devices.hostname LIKE 'host-%%' THEN EXCLUDED.hostname 
+                                                ELSE network_devices.hostname END;
+                        """, (f"dev-{src_ip.replace('.', '-')}", src_ip, src_mac, hname, vendor, dtype, method))
                 except Exception:
                     pass
 
@@ -331,22 +473,39 @@ services:
                     devices = []
                     try:
                         with conn.cursor() as cur:
-                            cur.execute("SELECT id, ip, mac, hostname, vendor, threat_score, trust_level, last_seen FROM network_devices ORDER BY last_seen DESC;")
+                            cur.execute("SELECT id, ip, mac, hostname, vendor, threat_score, trust_level, last_seen, discovery_method, custom_alias FROM network_devices ORDER BY last_seen DESC;")
                             rows = cur.fetchall()
                             for r in rows:
+                                ip_addr = r[1]
+                                mac_addr = r[2]
+                                stored_name = r[3]
+                                vendor_name = r[4] or get_vendor(mac_addr)
+                                disc_method = r[8] or "arp"
+                                custom_alias = r[9]
+
+                                # Se o hostname ainda for genérico ou vazio, tenta resolver agora
+                                effective_name = custom_alias or stored_name
+                                if not effective_name or effective_name.startswith("host-") or effective_name == "unknown-host":
+                                    resolved, m = resolve_device_identity(ip_addr, mac_addr)
+                                    if resolved and not resolved.startswith("host-"):
+                                        effective_name = resolved
+                                        disc_method = m
+
                                 devices.append({
                                     "id": r[0],
-                                    "ip": r[1],
-                                    "mac": r[2],
-                                    "hostname": r[3] or f"host-{r[1].split('.')[-1]}",
-                                    "vendor": r[4] or "Dispositivo de Rede",
+                                    "ip": ip_addr,
+                                    "mac": mac_addr,
+                                    "hostname": effective_name or f"host-{ip_addr.split('.')[-1]}",
+                                    "vendor": vendor_name,
                                     "threatScore": r[5] or 0,
                                     "trustLevel": r[6] or "unverified",
-                                    "deviceType": "gateway" if r[1].endswith(".1") else "workstation",
+                                    "deviceType": "gateway" if ip_addr.endswith(".1") else "workstation",
                                     "openPorts": [],
                                     "rxBytes": 1024,
                                     "txBytes": 1024,
                                     "isOnline": True,
+                                    "discoveryMethod": disc_method,
+                                    "customAlias": custom_alias,
                                     "lastSeen": str(r[7])[:19]
                                 })
                     except Exception:
@@ -354,19 +513,24 @@ services:
 
                     if not devices:
                         for item in parse_arp_table():
+                            ip_addr = item["ip"]
+                            mac_addr = item["mac"]
+                            hname, m = resolve_device_identity(ip_addr, mac_addr)
+                            vendor = get_vendor(mac_addr)
                             devices.append({
-                                "id": f"dev-{item['ip'].replace('.', '-')}",
-                                "ip": item["ip"],
-                                "mac": item["mac"],
-                                "hostname": f"host-{item['ip'].split('.')[-1]}",
-                                "vendor": "Hardware Conectado",
+                                "id": f"dev-{ip_addr.replace('.', '-')}",
+                                "ip": ip_addr,
+                                "mac": mac_addr,
+                                "hostname": hname,
+                                "vendor": vendor,
                                 "threatScore": 0,
                                 "trustLevel": "unverified",
-                                "deviceType": "gateway" if item["ip"].endswith(".1") else "workstation",
+                                "deviceType": "gateway" if ip_addr.endswith(".1") else "workstation",
                                 "openPorts": [],
                                 "rxBytes": 512,
                                 "txBytes": 512,
                                 "isOnline": True,
+                                "discoveryMethod": m,
                                 "lastSeen": "Agora"
                             })
 
@@ -502,24 +666,117 @@ services:
                         self.wfile.write(json.dumps({"success": False, "output": "Nenhum comando fornecido."}).encode("utf-8"))
 
                 elif self.path == "/api/scan":
-                    logging.info("Varredura ARP e descoberta de sub-rede disparada no Kali...")
+                    logging.info("Varredura profunda ARP + DNS + NetBIOS de sub-rede disparada no Kali...")
                     def run_network_sweep():
                         try:
+                            # 1. ARP Broadcast para despertar nós dormindo
                             subprocess.run(f"arping -b -c 2 -I {IFACE} 255.255.255.255 2>/dev/null", shell=True)
                         except Exception:
                             pass
+
                         try:
                             res = subprocess.run("ip -o -f inet addr show " + IFACE + " | awk '{print $4}'", shell=True, capture_output=True, text=True)
                             subnet = res.stdout.strip()
                             if subnet:
-                                subprocess.run(f"nmap -sn -n --send-ip {subnet} 2>/dev/null", shell=True)
+                                # 2. Nmap com resolucao de nomes DNS ativa (sem flag -n!)
+                                nmap_proc = subprocess.run(f"nmap -sn --system-dns {subnet} 2>/dev/null", shell=True, capture_output=True, text=True)
+                                nmap_out = nmap_proc.stdout or ""
+
+                                for block in nmap_out.split("Nmap scan report for "):
+                                    if not block.strip(): continue
+                                    lines = block.strip().split("\n")
+                                    hdr = lines[0].strip()
+                                    ip_found, hname_found = None, None
+                                    if "(" in hdr and ")" in hdr:
+                                        parts = hdr.split("(")
+                                        hname_found = parts[0].strip()
+                                        ip_found = parts[1].replace(")", "").strip()
+                                    else:
+                                        ip_found = hdr.strip()
+
+                                    mac_found = None
+                                    for l in lines:
+                                        if "MAC Address:" in l:
+                                            m_m = re.search(r"([0-9A-Fa-f:]{17})", l)
+                                            if m_m: mac_found = m_m.group(1).lower()
+
+                                    if ip_found:
+                                        if not mac_found:
+                                            for itm in parse_arp_table():
+                                                if itm["ip"] == ip_found:
+                                                    mac_found = itm["mac"]
+                                                    break
+                                        if not mac_found:
+                                            mac_found = f"52:54:00:{ip_found.split('.')[-1]}:00:01"
+
+                                        true_name, method = resolve_device_identity(ip_found, mac_found, hname_found)
+                                        vendor = get_vendor(mac_found)
+                                        dtype = "gateway" if ip_found.endswith(".1") else "workstation"
+
+                                        if conn:
+                                            with conn.cursor() as cur:
+                                                cur.execute("""
+                                                    INSERT INTO network_devices (id, ip, mac, hostname, vendor, device_type, discovery_method, is_online, last_seen)
+                                                    VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                                                    ON CONFLICT (ip) DO UPDATE SET 
+                                                        hostname = CASE WHEN network_devices.custom_alias IS NOT NULL THEN network_devices.hostname 
+                                                                        WHEN EXCLUDED.hostname NOT LIKE 'host-%%' THEN EXCLUDED.hostname 
+                                                                        ELSE network_devices.hostname END,
+                                                        vendor = CASE WHEN network_devices.vendor = 'Desconhecido' THEN EXCLUDED.vendor ELSE network_devices.vendor END,
+                                                        discovery_method = EXCLUDED.discovery_method,
+                                                        is_online = TRUE,
+                                                        last_seen = CURRENT_TIMESTAMP;
+                                                """, (f"dev-{ip_found.replace('.', '-')}", ip_found, mac_found, true_name, vendor, dtype, method))
+
+                        except Exception as e:
+                            logging.error(f"Erro no sweep de rede: {e}")
+
+                        # 3. Processa tabela ARP local tambem
+                        try:
+                            for item in parse_arp_table():
+                                ip_addr = item["ip"]
+                                mac_addr = item["mac"]
+                                hname, m = resolve_device_identity(ip_addr, mac_addr)
+                                vendor = get_vendor(mac_addr)
+                                dtype = "gateway" if ip_addr.endswith(".1") else "workstation"
+                                if conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute("""
+                                            INSERT INTO network_devices (id, ip, mac, hostname, vendor, device_type, discovery_method, is_online, last_seen)
+                                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                                            ON CONFLICT (ip) DO UPDATE SET 
+                                                last_seen = CURRENT_TIMESTAMP, 
+                                                is_online = TRUE;
+                                        """, (f"dev-{ip_addr.replace('.', '-')}", ip_addr, mac_addr, hname, vendor, dtype, m))
                         except Exception:
                             pass
+
                     threading.Thread(target=run_network_sweep, daemon=True).start()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
-                    self.wfile.write(json.dumps({"success": True, "message": "Varredura de sub-rede iniciada no Kali Linux."}).encode("utf-8"))
+                    self.wfile.write(json.dumps({"success": True, "message": "Varredura ativa Nmap com resolucao de DNS e NetBIOS iniciada no Kali Linux."}).encode("utf-8"))
+
+                elif self.path == "/api/device/alias":
+                    ip = payload.get("ip", "")
+                    mac = payload.get("mac", "")
+                    alias = payload.get("alias", "").strip()
+                    if conn and (ip or mac):
+                        try:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    UPDATE network_devices 
+                                    SET custom_alias = %s, 
+                                        hostname = CASE WHEN %s != '' THEN %s ELSE hostname END,
+                                        discovery_method = 'manual'
+                                    WHERE ip = %s OR mac = %s;
+                                """, (alias or None, alias, alias, ip, mac))
+                        except Exception as e:
+                            logging.error(f"Erro ao salvar alias: {e}")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"success": True, "ip": ip, "alias": alias}).encode("utf-8"))
                 else:
                     self.send_response(404)
                     self.end_headers()

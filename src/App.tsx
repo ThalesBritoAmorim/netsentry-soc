@@ -88,9 +88,19 @@ export default function App() {
     showToast(`Confiabilidade do dispositivo atualizada para ${level}.`, 'success');
   };
 
-  const handleScanSubnet = () => {
-    networkEngine.scanSubnet();
-    showToast('Varredura de sub-rede ARP iniciada no Kali Linux. Dispositivos atualizados.', 'success');
+  const handleScanSubnet = (deep: boolean = false) => {
+    networkEngine.scanSubnet(deep);
+    showToast(
+      deep 
+        ? 'Varredura Profunda Nmap (DNS + NetBIOS + Portas) iniciada no Kali Linux!' 
+        : 'Varredura Rápida ARP iniciada no Kali Linux. Dispositivos atualizados.', 
+      'success'
+    );
+  };
+
+  const handleSetDeviceAlias = (deviceId: string, alias: string) => {
+    networkEngine.setDeviceAlias(deviceId, alias);
+    showToast(`Identificação/Alias do host atualizado com sucesso!`, 'success');
   };
 
   const handleToggleRule = (ruleId: string, enabled: boolean) => {
@@ -179,6 +189,7 @@ export default function App() {
             devices={engineState.devices}
             onSetTrustLevel={handleSetTrustLevel}
             onScanSubnet={handleScanSubnet}
+            onSetDeviceAlias={handleSetDeviceAlias}
             onOpenKaliTerminal={handleOpenTerminalWithCommand}
           />
         )}

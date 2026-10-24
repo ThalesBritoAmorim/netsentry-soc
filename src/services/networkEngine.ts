@@ -17,6 +17,70 @@ import {
   INITIAL_AUDIT_LOGS, 
   INITIAL_SYSTEM_METRICS 
 } from './initialData';
+import { parametersService } from './parametersService';
+
+// Client-side MAC OUI prefix dictionary for instant local vendor identification
+const CLIENT_OUI_MAP: Record<string, string> = {
+  'b8:27:eb': 'Raspberry Pi Foundation',
+  'dc:a6:32': 'Raspberry Pi Foundation',
+  'e4:5f:01': 'Raspberry Pi Foundation',
+  '00:50:56': 'VMware ESXi / Workstation',
+  '08:00:27': 'Oracle VirtualBox',
+  '52:54:00': 'QEMU / KVM Host',
+  '00:1a:2b': 'Apple Inc.',
+  '3c:22:fb': 'Apple Inc. (iPhone/Mac)',
+  'b0:be:76': 'Apple Inc.',
+  'd8:bb:2c': 'Apple Inc.',
+  'f8:1e:df': 'Apple Inc.',
+  '18:67:b0': 'Samsung Electronics',
+  '24:4b:fe': 'Samsung Electronics',
+  '30:07:4d': 'Samsung Galaxy',
+  '24:0a:c4': 'Espressif (ESP32 IoT)',
+  '30:ae:a4': 'Espressif Systems',
+  '84:f3:eb': 'Espressif (NodeMCU IoT)',
+  '50:c7:bf': 'TP-Link Technologies',
+  '1c:3b:f3': 'TP-Link Archer / Deco',
+  '54:af:97': 'TP-Link Technologies',
+  '00:0c:e7': 'Cisco Systems',
+  '00:1e:67': 'Intel Corporate',
+  '00:14:22': 'Dell Inc.',
+  '00:1e:0b': 'HP Inc.',
+  '00:11:32': 'Synology NAS',
+  '00:08:9b': 'QNAP NAS',
+  '44:65:0d': 'Amazon Echo / FireTV',
+  '70:ee:50': 'Google Nest / Chromecast',
+  '78:11:dc': 'Xiaomi Communications',
+  '10:bf:48': 'ASUSTeK Computer'
+};
+
+function getClientVendor(mac: string): string {
+  if (!mac) return 'Desconhecido';
+  const prefix = mac.toLowerCase().split(':').slice(0, 3).join(':');
+  return CLIENT_OUI_MAP[prefix] || 'Dispositivo de Rede IEEE';
+}
+
+const DEVICE_ALIAS_STORAGE_KEY = 'netsentry_device_aliases_v1';
+
+function getStoredAliases(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(DEVICE_ALIAS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveStoredAlias(key: string, alias: string) {
+  try {
+    const current = getStoredAliases();
+    if (alias.trim()) {
+      current[key] = alias.trim();
+    } else {
+      delete current[key];
+    }
+    localStorage.setItem(DEVICE_ALIAS_STORAGE_KEY, JSON.stringify(current));
+  } catch (e) {}
+}
 
 export interface NetworkEngineState {
   devices: NetworkDevice[];
@@ -161,7 +225,20 @@ class NetworkEngine {
           if (devRes.ok) {
             const devData = await devRes.json();
             if (Array.isArray(devData) && devData.length > 0) {
-              this.state.devices = devData;
+              const aliases = getStoredAliases();
+              this.state.devices = devData.map((d: NetworkDevice) => {
+                const alias = aliases[d.ip] || aliases[d.mac] || aliases[d.id] || d.customAlias;
+                const vendor = (!d.vendor || d.vendor === 'Desconhecido' || d.vendor === 'Hardware Conectado')
+                  ? getClientVendor(d.mac)
+                  : d.vendor;
+                return {
+                  ...d,
+                  hostname: alias || d.hostname || `host-${d.ip.split('.').pop()}`,
+                  customAlias: alias,
+                  vendor,
+                  discoveryMethod: alias ? 'manual' : (d.discoveryMethod || 'arp'),
+                };
+              });
             }
           }
         } catch (e) {}
@@ -217,6 +294,8 @@ class NetworkEngine {
     const now = new Date();
     const timeStr = now.toLocaleTimeString('pt-BR');
     const fullDate = now.toISOString().replace('T', ' ').substring(0, 19);
+    const userParams = parametersService.get();
+    const ruleAction = (userParams.iptablesRuleType || 'drop').toUpperCase();
 
     let alert: ThreatAlert;
 
@@ -240,15 +319,15 @@ class NetworkEngine {
           status: 'active',
           playbook: {
             id: `pb-${Date.now()}`,
-            actionName: 'Bloqueio de MAC no Kernel Netfilter & Reset ARP',
-            description: 'Dropar tráfego do MAC forjado na tabela de filtro e restaurar rota ARP legítima do Gateway.',
+            actionName: `Bloqueio de MAC no Kernel Netfilter (${ruleAction}) & Reset ARP`,
+            description: 'Aplicar descarte no kernel para o MAC forjado e restaurar rota legítima do Gateway.',
             severity: 'critical',
-            iptablesCommand: `sudo iptables -I INPUT -m mac --mac-source ${attackerMac} -j DROP && sudo iptables -I FORWARD -m mac --mac-source ${attackerMac} -j DROP`,
+            iptablesCommand: `sudo iptables -I INPUT -m mac --mac-source ${attackerMac} -j ${ruleAction} && sudo iptables -I FORWARD -m mac --mac-source ${attackerMac} -j ${ruleAction}`,
             kaliToolCommand: `sudo arpspoof -i eth0 -t 192.168.1.1 ${attackerIp} -r`,
             suricataRule: `drop arp ${attackerMac} any -> any any (msg:"NETSENTRY Autodetect ARP Poisoning"; sid:9000101; rev:1;)`,
             automatedAvailable: true,
             applied: false,
-            rollbackCommand: `sudo iptables -D INPUT -m mac --mac-source ${attackerMac} -j DROP && sudo iptables -D FORWARD -m mac --mac-source ${attackerMac} -j DROP`
+            rollbackCommand: `sudo iptables -D INPUT -m mac --mac-source ${attackerMac} -j ${ruleAction} && sudo iptables -D FORWARD -m mac --mac-source ${attackerMac} -j ${ruleAction}`
           }
         };
 
@@ -282,19 +361,19 @@ class NetworkEngine {
           protocol: 'TCP',
           confidence: 96,
           mitreAttack: 'T1046 - Network Service Discovery',
-          details: `Origem enviou pacotes TCP SYN para 180 portas altas distintas do nó Kali Linux em 1.8 segundos sem finalizar handshake.`,
+          details: `Origem enviou pacotes TCP SYN para ${userParams.portScanThreshold * 8} portas altas distintas em 1.5s, superando o limiar de ${userParams.portScanThreshold} portas configurado.`,
           status: 'active',
           playbook: {
             id: `pb-${Date.now()}`,
-            actionName: 'Iptables SYN Rate Limit & Blackhole Temporário',
-            description: 'Bloquear novos handshakes TCP da origem e aplicar quarentena de 1 hora.',
+            actionName: `Iptables SYN Rate Limit & Blackhole (${ruleAction})`,
+            description: 'Bloquear novos handshakes TCP da origem e aplicar quarentena.',
             severity: 'high',
-            iptablesCommand: `sudo iptables -I INPUT -s ${attackerIp} -p tcp --syn -j DROP`,
+            iptablesCommand: `sudo iptables -I INPUT -s ${attackerIp} -p tcp --syn -j ${ruleAction}`,
             kaliToolCommand: `sudo ip route add blackhole ${attackerIp}/32`,
             suricataRule: `alert tcp ${attackerIp} any -> any any (flags:S; threshold:type both, track by_src, count 20, seconds 5; msg:"NETSENTRY SYN Sweep"; sid:9000102; rev:1;)`,
             automatedAvailable: true,
             applied: false,
-            rollbackCommand: `sudo iptables -D INPUT -s ${attackerIp} -p tcp --syn -j DROP && sudo ip route del blackhole ${attackerIp}/32`
+            rollbackCommand: `sudo iptables -D INPUT -s ${attackerIp} -p tcp --syn -j ${ruleAction} && sudo ip route del blackhole ${attackerIp}/32`
           }
         };
 
@@ -445,7 +524,8 @@ class NetworkEngine {
     );
 
     // If autonomous mitigation is enabled and alert is critical/high, execute automatically!
-    if (this.state.metrics.autonomousMode && alert.playbook.automatedAvailable) {
+    const params = parametersService.get();
+    if (this.state.metrics.autonomousMode && params.autoBlockHighSeverity && alert.playbook.automatedAvailable) {
       setTimeout(() => {
         this.applyMitigation(alert.id, 'Autonomous Engine Daemon');
       }, 1200);
@@ -462,7 +542,7 @@ class NetworkEngine {
     // Send real command to Kali Linux kernel via REST API
     if (this.state.metrics.isLiveKaliConnected && alert.playbook.iptablesCommand) {
       try {
-        await fetch(`${this.kaliHostUrl}/api/mitigate`, {
+        await fetch(this.getEndpoint('/mitigate'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: alert.playbook.iptablesCommand })
@@ -500,7 +580,7 @@ class NetworkEngine {
 
     if (this.state.metrics.isLiveKaliConnected && alert.playbook.rollbackCommand) {
       try {
-        await fetch(`${this.kaliHostUrl}/api/mitigate`, {
+        await fetch(this.getEndpoint('/mitigate'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command: alert.playbook.rollbackCommand })
@@ -549,10 +629,44 @@ class NetworkEngine {
     this.notify();
   }
 
-  public async scanSubnet() {
+  public setDeviceAlias(targetIdOrIp: string, alias: string) {
+    const dev = this.state.devices.find(d => d.id === targetIdOrIp || d.ip === targetIdOrIp || d.mac === targetIdOrIp);
+    if (!dev) return;
+
+    const cleanAlias = alias.trim();
+    saveStoredAlias(dev.ip, cleanAlias);
+    saveStoredAlias(dev.mac, cleanAlias);
+    saveStoredAlias(dev.id, cleanAlias);
+
+    dev.customAlias = cleanAlias || undefined;
+    dev.hostname = cleanAlias || `host-${dev.ip.split('.').pop()}`;
+    dev.discoveryMethod = cleanAlias ? 'manual' : (dev.discoveryMethod || 'arp');
+
+    // Persist to server / Kali agent if connected
+    fetch(this.getEndpoint('/device/alias'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip: dev.ip, mac: dev.mac, alias: cleanAlias })
+    }).catch(() => {});
+
+    this.addAuditLog(
+      'thalesbritoamorim89@gmail.com',
+      `Identificação de Host (Alias): ${dev.ip} -> ${cleanAlias || '(Nome Original)'}`,
+      dev.ip,
+      'success'
+    );
+
+    this.notify();
+  }
+
+  public async scanSubnet(deepMode: boolean = false) {
     if (this.state.metrics.isLiveKaliConnected) {
       try {
-        await fetch(`${this.kaliHostUrl}/api/scan`, { method: 'POST' });
+        await fetch(this.getEndpoint('/scan'), { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deep: deepMode })
+        });
       } catch (err) {
         console.error('Erro ao disparar varredura no Kali:', err);
       }
@@ -560,15 +674,18 @@ class NetworkEngine {
 
     this.addAuditLog(
       'thalesbritoamorim89@gmail.com',
-      `Varredura ARP Sub-rede Kali Linux ${this.state.metrics.isLiveKaliConnected ? '(Host Real)' : '(Simulação)'}`,
+      `Varredura ${deepMode ? 'Profunda (Nmap + DNS + NetBIOS)' : 'Rápida (ARP Sweep)'} Kali Linux ${this.state.metrics.isLiveKaliConnected ? '(Host Real)' : '(Simulação)'}`,
       '192.168.1.0/24',
       'success'
     );
-    // Refresh device lastSeen
+
+    // Refresh device lastSeen and re-poll quickly
     this.state.devices.forEach(d => {
       d.lastSeen = 'Agora (Varredura)';
     });
     this.notify();
+
+    setTimeout(() => this.pollRealKali(), 2000);
   }
 
   // --- Rule Management ---

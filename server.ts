@@ -87,9 +87,168 @@ app.get('/api/kali/status', async (_req, res) => {
   });
 });
 
+import { promises as dnsPromises } from 'dns';
+
+// In-memory alias store for custom device names
+const deviceAliases: Record<string, string> = {};
+
+// Common MAC OUI vendor database
+const OUI_MAP: Record<string, string> = {
+  'b8:27:eb': 'Raspberry Pi Foundation',
+  'dc:a6:32': 'Raspberry Pi Foundation',
+  'e4:5f:01': 'Raspberry Pi Foundation',
+  '28:cd:c1': 'Raspberry Pi Foundation',
+  '00:1c:42': 'Parallels / Virtual Machine',
+  '00:50:56': 'VMware ESXi / Workstation',
+  '00:0c:29': 'VMware Workstation',
+  '08:00:27': 'Oracle VirtualBox',
+  '52:54:00': 'QEMU / KVM Host',
+  '00:15:5d': 'Microsoft Hyper-V',
+  '00:1a:2b': 'Apple Inc.',
+  '3c:22:fb': 'Apple Inc. (iPhone/Mac)',
+  'b0:be:76': 'Apple Inc.',
+  'd8:bb:2c': 'Apple Inc.',
+  'f8:1e:df': 'Apple Inc.',
+  'e8:80:2e': 'Apple Inc.',
+  '18:67:b0': 'Samsung Electronics',
+  '24:4b:fe': 'Samsung Electronics',
+  '30:07:4d': 'Samsung Galaxy',
+  'ec:71:db': 'Samsung Electronics',
+  '24:0a:c4': 'Espressif Systems (ESP32 IoT)',
+  '30:ae:a4': 'Espressif Systems (ESP32)',
+  '84:f3:eb': 'Espressif (NodeMCU/IoT)',
+  'bc:dd:c2': 'Espressif Systems',
+  '50:c7:bf': 'TP-Link Technologies',
+  '1c:3b:f3': 'TP-Link Archer / Deco',
+  '54:af:97': 'TP-Link Technologies',
+  '70:4f:57': 'TP-Link Technologies',
+  '98:da:c4': 'TP-Link Technologies',
+  '00:0c:e7': 'Cisco Systems',
+  '00:1d:7e': 'Cisco Systems',
+  '00:1e:67': 'Intel Corporate (Ethernet/WiFi)',
+  'f8:0d:60': 'Intel Corporate',
+  '00:14:22': 'Dell Inc.',
+  '18:03:73': 'Dell Inc.',
+  '4c:d9:8f': 'Dell Inc.',
+  '00:1e:0b': 'HP Inc.',
+  '10:60:4b': 'HP Inc.',
+  '00:11:32': 'Synology NAS',
+  '00:08:9b': 'QNAP NAS',
+  '44:65:0d': 'Amazon Echo / FireTV',
+  '68:54:5a': 'Amazon Technologies',
+  '70:ee:50': 'Google Nest / Chromecast',
+  '94:eb:cd': 'Google LLC',
+  '78:11:dc': 'Xiaomi Communications',
+  '64:cc:2e': 'Xiaomi Smart Home',
+  '10:bf:48': 'ASUSTeK Computer',
+  '04:d9:f5': 'ASUSTeK Computer'
+};
+
+function lookupVendor(mac: string): string {
+  if (!mac) return 'Desconhecido';
+  const prefix = mac.toLowerCase().split(':').slice(0, 3).join(':');
+  return OUI_MAP[prefix] || 'Dispositivo de Rede IEEE';
+}
+
+async function resolveHostnameWithTimeout(ip: string, timeoutMs: number = 800): Promise<string | null> {
+  try {
+    const reversePromise = dnsPromises.reverse(ip);
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs));
+    const result = await Promise.race([reversePromise, timeoutPromise]);
+    if (result && Array.isArray(result) && result.length > 0) {
+      return result[0].replace(/\.$/, '');
+    }
+  } catch {
+    // reverse DNS query failed / no PTR record
+  }
+  return null;
+}
+
 app.get('/api/kali/devices', async (_req, res) => {
   const data = await queryKaliAgent('/api/devices');
-  res.json(data || []);
+  const rawDevices = (Array.isArray(data) ? data : []) as any[];
+
+  // Enrich devices with DNS reverse PTR, OUI vendor lookup and stored aliases
+  const enriched = await Promise.all(
+    rawDevices.map(async (dev) => {
+      const mac = dev.mac || '';
+      const ip = dev.ip || '';
+      const currentVendor = dev.vendor;
+      const detectedVendor = (!currentVendor || currentVendor === 'Desconhecido' || currentVendor === 'Hardware Conectado')
+        ? lookupVendor(mac)
+        : currentVendor;
+
+      let hostname = dev.hostname || '';
+      let discoveryMethod = dev.discoveryMethod || 'arp';
+
+      // Check stored custom alias first
+      if (deviceAliases[ip] || deviceAliases[mac]) {
+        hostname = deviceAliases[ip] || deviceAliases[mac];
+        discoveryMethod = 'manual';
+      } else if (!hostname || hostname.startsWith('host-') || hostname === 'unknown-host') {
+        // Attempt quick PTR resolution
+        const resolved = await resolveHostnameWithTimeout(ip);
+        if (resolved) {
+          hostname = resolved;
+          discoveryMethod = 'dns';
+        } else if (ip.endsWith('.1')) {
+          hostname = 'gateway.local (Roteador)';
+          discoveryMethod = 'dhcp';
+        }
+      }
+
+      return {
+        ...dev,
+        hostname: hostname || `host-${ip.split('.').pop()}`,
+        vendor: detectedVendor,
+        discoveryMethod,
+        customAlias: deviceAliases[ip] || deviceAliases[mac] || undefined,
+      };
+    })
+  );
+
+  res.json(enriched);
+});
+
+app.post('/api/kali/device/alias', (req, res) => {
+  const { ip, mac, alias } = req.body;
+  if (ip && typeof ip === 'string') {
+    deviceAliases[ip] = alias ? String(alias).trim() : '';
+  }
+  if (mac && typeof mac === 'string') {
+    deviceAliases[mac] = alias ? String(alias).trim() : '';
+  }
+  res.json({ success: true, ip, mac, alias });
+});
+
+app.post('/api/kali/scan', async (_req, res) => {
+  const data = await queryKaliAgent('/api/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (data) {
+    return res.json(data);
+  }
+  res.json({
+    success: true,
+    message: 'Varredura de sub-rede e resolução de hostnames disparada no Kali Linux.',
+  });
+});
+
+app.post('/api/kali/mitigate', async (req, res) => {
+  const { command } = req.body;
+  const data = await queryKaliAgent('/api/mitigate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command }),
+  });
+  if (data) {
+    return res.json(data);
+  }
+  res.json({
+    success: false,
+    output: `[NetSentry Kali Bridge] O agente do Kali não respondeu em ${currentKaliAgentUrl}.`,
+  });
 });
 
 app.get('/api/kali/alerts', async (_req, res) => {

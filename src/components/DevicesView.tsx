@@ -22,13 +22,18 @@ import {
   Check,
   Play,
   Zap,
-  Info
+  Info,
+  Edit3,
+  Save,
+  Globe,
+  Network
 } from 'lucide-react';
 
 interface DevicesViewProps {
   devices: NetworkDevice[];
   onSetTrustLevel: (deviceId: string, level: DeviceTrustLevel) => void;
-  onScanSubnet: () => void;
+  onScanSubnet: (deep?: boolean) => void;
+  onSetDeviceAlias?: (deviceId: string, alias: string) => void;
   onOpenKaliTerminal?: (cmd: string) => void;
 }
 
@@ -36,6 +41,7 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
   devices,
   onSetTrustLevel,
   onScanSubnet,
+  onSetDeviceAlias,
   onOpenKaliTerminal
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -43,6 +49,9 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
   const [filterTrust, setFilterTrust] = useState<string>('all');
   const [selectedDevice, setSelectedDevice] = useState<NetworkDevice | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+  const [aliasInputValue, setAliasInputValue] = useState('');
+  const [isDeepScanning, setIsDeepScanning] = useState(false);
 
   const handleCopy = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
@@ -50,12 +59,79 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
+  const handleStartEdit = (e: React.MouseEvent, dev: NetworkDevice) => {
+    e.stopPropagation();
+    setEditingDeviceId(dev.id);
+    setAliasInputValue(dev.customAlias || dev.hostname || '');
+  };
+
+  const handleSaveAlias = (e: React.MouseEvent, dev: NetworkDevice) => {
+    e.stopPropagation();
+    if (onSetDeviceAlias) {
+      onSetDeviceAlias(dev.id, aliasInputValue);
+    }
+    setEditingDeviceId(null);
+  };
+
+  const handleCancelEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingDeviceId(null);
+  };
+
+  const handleDeepScanClick = () => {
+    setIsDeepScanning(true);
+    onScanSubnet(true);
+    setTimeout(() => setIsDeepScanning(false), 4000);
+  };
+
+  const getDiscoveryBadge = (method?: string) => {
+    switch (method) {
+      case 'dns':
+        return (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-950/90 text-cyan-300 border border-cyan-800" title="Resolvido via DNS Reverso (PTR / Router)">
+            DNS (PTR)
+          </span>
+        );
+      case 'netbios':
+        return (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-800" title="Resolvido via NetBIOS Name Service (Windows)">
+            NetBIOS (Win)
+          </span>
+        );
+      case 'dhcp':
+        return (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-950/90 text-indigo-300 border border-indigo-800" title="Resolvido via DHCP Option 12 (Nome Anunciado)">
+            DHCP Option 12
+          </span>
+        );
+      case 'mdns':
+        return (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-purple-950/90 text-purple-300 border border-purple-800" title="Resolvido via Multicast DNS (.local)">
+            mDNS (.local)
+          </span>
+        );
+      case 'manual':
+        return (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-950/90 text-amber-300 border border-amber-800" title="Alias personalizado pelo operador">
+            Personalizado
+          </span>
+        );
+      default:
+        return (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400" title="Detectado via pacote ARP / Sniffer">
+            ARP
+          </span>
+        );
+    }
+  };
+
   const filteredDevices = devices.filter((dev) => {
     const matchesSearch = 
       dev.ip.toLowerCase().includes(searchTerm.toLowerCase()) ||
       dev.hostname.toLowerCase().includes(searchTerm.toLowerCase()) ||
       dev.mac.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      dev.vendor.toLowerCase().includes(searchTerm.toLowerCase());
+      dev.vendor.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (dev.customAlias && dev.customAlias.toLowerCase().includes(searchTerm.toLowerCase()));
 
     const matchesType = filterType === 'all' || dev.deviceType === filterType;
     const matchesTrust = filterTrust === 'all' || dev.trustLevel === filterTrust;
@@ -91,21 +167,34 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-base font-semibold text-slate-100 flex items-center gap-2">
-            <span>Inventário & Mapa de Dispositivos Conectados</span>
+            <span>Inventário & Descoberta Ativa de Dispositivos</span>
             <span className="text-xs text-slate-400 font-mono">({devices.length} hosts catalogados)</span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Monitoramento de endereços MAC, fabricantes OUI, portas abertas e postura de segurança na sub-rede.
+            Identificação de hostnames reais (DHCP Option 12, NetBIOS UDP/137, Reverse DNS e mDNS) e fabricantes IEEE OUI.
           </p>
         </div>
 
-        <button
-          onClick={onScanSubnet}
-          className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 transition-colors shadow-sm self-start sm:self-auto"
-        >
-          <Radio className="w-3.5 h-3.5" />
-          <span>Escanear Sub-rede (ARP Sweep)</span>
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={() => onScanSubnet(false)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors shadow-sm"
+            title="Dispara ARP sweep rápido para atualizar dispositivos conectados"
+          >
+            <Radio className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Scan Rápido (ARP)</span>
+          </button>
+
+          <button
+            onClick={handleDeepScanClick}
+            disabled={isDeepScanning}
+            className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 disabled:opacity-75 transition-colors shadow-sm"
+            title="Dispara Nmap ativo com resolução de nomes de sistema, NetBIOS e portas abertas"
+          >
+            <Zap className={`w-3.5 h-3.5 ${isDeepScanning ? 'animate-spin' : ''}`} />
+            <span>{isDeepScanning ? 'Varrendo Nmap + DNS...' : 'Varredura Profunda (Nmap + Hostnames)'}</span>
+          </button>
+        </div>
       </div>
 
       {/* 2. Filters & Search Bar */}
@@ -193,7 +282,7 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
                         O inventário exibirá exclusivamente os dispositivos reais coletados da sua rede pelo daemon do Kali Linux (via tabela ARP, Scapy e Nmap).
                       </p>
                       <button
-                        onClick={onScanSubnet}
+                        onClick={() => onScanSubnet(false)}
                         className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-slate-950 bg-cyan-400 hover:bg-cyan-300 transition-colors shadow-sm"
                       >
                         <Zap className="w-3.5 h-3.5" />
@@ -214,17 +303,60 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
                       <div className="p-1.5 rounded-md bg-slate-950 border border-slate-800 shrink-0">
                         {getDeviceIcon(dev.deviceType)}
                       </div>
-                      <div>
-                        <div className="font-semibold text-slate-100 flex items-center gap-1.5">
-                          <span>{dev.hostname}</span>
-                          {dev.id === 'dev-2' && (
-                            <span className="text-[10px] font-mono bg-cyan-950 text-cyan-300 px-1 rounded border border-cyan-800">
-                              ESTE HOST
+                      <div className="min-w-0">
+                        {editingDeviceId === dev.id ? (
+                          <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="text"
+                              value={aliasInputValue}
+                              onChange={(e) => setAliasInputValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSaveAlias(e as any, dev);
+                                if (e.key === 'Escape') handleCancelEdit(e as any);
+                              }}
+                              placeholder="Nome / Alias personalizado..."
+                              className="px-2 py-0.5 bg-slate-950 border border-cyan-500 rounded text-xs text-cyan-200 focus:outline-none w-44 font-sans"
+                              autoFocus
+                            />
+                            <button
+                              onClick={(e) => handleSaveAlias(e, dev)}
+                              className="p-1 text-emerald-400 hover:bg-slate-800 rounded"
+                              title="Salvar Nome"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              className="p-1 text-slate-400 hover:bg-slate-800 rounded"
+                              title="Cancelar"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-semibold text-slate-100 truncate max-w-[200px]" title={dev.hostname}>
+                              {dev.hostname}
                             </span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-slate-500 font-sans">
-                          {getDeviceLabel(dev.deviceType)}
+                            <button
+                              onClick={(e) => handleStartEdit(e, dev)}
+                              className="text-slate-500 hover:text-cyan-400 p-0.5 rounded hover:bg-slate-800/80 transition-colors"
+                              title="Definir nome ou apelido para este host"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                            </button>
+                            {dev.id === 'dev-2' && (
+                              <span className="text-[10px] font-mono bg-cyan-950 text-cyan-300 px-1 rounded border border-cyan-800">
+                                ESTE HOST
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-[11px] text-slate-500 font-sans">
+                            {getDeviceLabel(dev.deviceType)}
+                          </span>
+                          {getDiscoveryBadge(dev.discoveryMethod)}
                         </div>
                       </div>
                     </div>
@@ -351,6 +483,50 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
 
             {/* Body */}
             <div className="p-6 overflow-y-auto space-y-6 text-xs text-slate-300">
+              {/* Hostname & Identity Management */}
+              <div className="p-3.5 bg-slate-950/80 rounded-lg border border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Identificação & Protocolo de Descoberta</span>
+                  </span>
+                  {getDiscoveryBadge(selectedDevice.discoveryMethod)}
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      id="modal-alias-input"
+                      defaultValue={selectedDevice.customAlias || selectedDevice.hostname}
+                      placeholder="Defina um nome amigável (ex: Meu PC Windows 11)..."
+                      className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500 font-sans"
+                    />
+                  </div>
+                  <button
+                    onClick={() => {
+                      const input = document.getElementById('modal-alias-input') as HTMLInputElement;
+                      if (input && onSetDeviceAlias) {
+                        onSetDeviceAlias(selectedDevice.id, input.value);
+                        setSelectedDevice({
+                          ...selectedDevice,
+                          hostname: input.value.trim() || `host-${selectedDevice.ip.split('.').pop()}`,
+                          customAlias: input.value.trim() || undefined,
+                          discoveryMethod: input.value.trim() ? 'manual' : (selectedDevice.discoveryMethod || 'arp')
+                        });
+                      }
+                    }}
+                    className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold rounded-lg text-xs transition-colors shrink-0 font-sans shadow-sm"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Salvar Identificação</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500 font-sans">
+                  Protocolo de origem: <strong className="text-slate-300">{selectedDevice.discoveryMethod?.toUpperCase() || 'ARP'}</strong>. Nomes personalizados são salvos localmente e sincronizados com a tabela do PostgreSQL do Kali Linux.
+                </p>
+              </div>
+
               {/* Telemetry Summary */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
