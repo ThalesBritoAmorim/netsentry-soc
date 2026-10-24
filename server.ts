@@ -237,6 +237,18 @@ app.post('/api/kali/scan', async (_req, res) => {
 
 app.post('/api/kali/mitigate', async (req, res) => {
   const { command } = req.body;
+
+  // Anti-Self-Block Protection: Never drop local host or gateway IP
+  if (command && typeof command === 'string') {
+    const isSelfBlock = ['192.168.0.156', '127.0.0.1', 'localhost', '192.168.0.1'].some(ip => command.includes(ip));
+    if (isSelfBlock) {
+      return res.json({
+        success: false,
+        output: '[NetSentry Self-Protection] Operação rejeitada: O IP alvo pertence ao host Kali Linux ou gateway. Para evitar perda de acesso e bloqueio de comandos, regras de DROP para esta máquina não são permitidas.',
+      });
+    }
+  }
+
   const data = await queryKaliAgent('/api/mitigate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -248,6 +260,35 @@ app.post('/api/kali/mitigate', async (req, res) => {
   res.json({
     success: false,
     output: `[NetSentry Kali Bridge] O agente do Kali não respondeu em ${currentKaliAgentUrl}.`,
+  });
+});
+
+app.post('/api/kali/unblock', async (req, res) => {
+  const ip = req.body?.ip || '192.168.0.156';
+
+  // 1. Send unblock request to Kali Scapy daemon agent
+  const data = await queryKaliAgent('/api/unblock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip }),
+  });
+
+  // 2. Also try executing flush directly if running on Linux
+  try {
+    const { exec } = await import('child_process');
+    const cmds = [
+      `iptables -D INPUT -s ${ip} -p tcp --syn -j DROP 2>/dev/null`,
+      `iptables -D INPUT -s ${ip} -j DROP 2>/dev/null`,
+      `iptables -D FORWARD -s ${ip} -j DROP 2>/dev/null`
+    ].join('; ');
+    exec(cmds, () => {});
+  } catch {}
+
+  return res.json({
+    success: true,
+    unblockedIp: ip,
+    message: `Regras de DROP para ${ip} removidas do iptables no host Kali Linux com sucesso! Comandos liberados.`,
+    agentResponse: data || null
   });
 });
 

@@ -539,6 +539,20 @@ class NetworkEngine {
     const alert = this.state.alerts.find(a => a.id === alertId);
     if (!alert || alert.playbook.applied) return;
 
+    // PROTEÇÃO CRÍTICA ANTI-AUTO-BLOQUEIO:
+    // Nunca aplicar regras de descarte/DROP contra o próprio host Kali (192.168.0.156) ou IPs da Whitelist
+    if (parametersService.isWhitelisted(alert.sourceIp) || alert.sourceIp === '192.168.0.156' || alert.sourceIp === '127.0.0.1') {
+      this.addAuditLog(
+        'NetSentry Anti-Self-Block',
+        `BLOQUEIO PREVENIDO: O IP ${alert.sourceIp} é o próprio host Kali Linux ou está na Whitelist. Regra DROP cancelada para evitar perda de controle do terminal.`,
+        alert.sourceIp,
+        'warning'
+      );
+      alert.status = 'active';
+      this.notify();
+      return;
+    }
+
     // Send real command to Kali Linux kernel via REST API
     if (this.state.metrics.isLiveKaliConnected && alert.playbook.iptablesCommand) {
       try {
@@ -600,6 +614,53 @@ class NetworkEngine {
       `Rollback de Mitigação: ${alert.playbook.actionName}`,
       alert.sourceIp,
       'warning'
+    );
+
+    this.notify();
+  }
+
+  // --- Desbloqueio de Emergência do Host Kali Linux ---
+  public async unblockHost(targetIp: string = '192.168.0.156', operator: string = 'thalesbritoamorim89@gmail.com') {
+    // 1. Registra IP na whitelist definitiva
+    parametersService.addWhitelistedIp(targetIp);
+
+    // 2. Atualiza estado de alertas em memória
+    this.state.alerts.forEach(a => {
+      if (a.sourceIp === targetIp) {
+        a.playbook.applied = false;
+        a.playbook.appliedAt = undefined;
+        a.status = 'active';
+      }
+    });
+
+    // 3. Envia requisição de unblock para o backend e para o agente do Kali
+    try {
+      await fetch('/api/kali/unblock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip: targetIp })
+      });
+    } catch (err) {
+      console.warn('Erro ao disparar /api/kali/unblock:', err);
+    }
+
+    if (this.state.metrics.isLiveKaliConnected) {
+      try {
+        await fetch(this.getEndpoint('/unblock'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ip: targetIp })
+        });
+      } catch (err) {
+        console.warn('Erro ao disparar agente direto /unblock:', err);
+      }
+    }
+
+    this.addAuditLog(
+      operator,
+      `DESBLOQUEIO DE EMERGÊNCIA: Regras de DROP para ${targetIp} (Host Kali) removidas no Netfilter. Conectividade restaurada!`,
+      targetIp,
+      'success'
     );
 
     this.notify();

@@ -44,6 +44,7 @@ interface DashboardViewProps {
   onNavigateToDevices: () => void;
   onNavigateToDeploy: () => void;
   onOpenKaliTerminal?: (cmd: string) => void;
+  onUnblockHost?: (ip: string) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -57,7 +58,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onSimulateAttack,
   onNavigateToDevices,
   onNavigateToDeploy,
-  onOpenKaliTerminal
+  onOpenKaliTerminal,
+  onUnblockHost
 }) => {
   const [filterSeverity, setFilterSeverity] = useState<'all' | 'critical' | 'high' | 'active'>('all');
   const [analyticsLayout, setAnalyticsLayout] = useState<'split' | 'traffic' | 'heatmap'>('split');
@@ -65,6 +67,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const activeAlerts = alerts.filter(a => a.status === 'active' || a.status === 'investigating');
   const criticalCount = alerts.filter(a => a.severity === 'critical' && a.status === 'active').length;
   const highCount = alerts.filter(a => a.severity === 'high' && a.status === 'active').length;
+
+  // Detecta se o Kali Linux (192.168.0.156) ou host local sofreu auto-bloqueio
+  const selfBlockedAlerts = alerts.filter(a => 
+    (a.sourceIp === '192.168.0.156' || a.sourceIp === '127.0.0.1' || a.sourceIp === 'localhost') && 
+    (a.playbook?.applied || a.status === 'mitigated' || a.category === 'port_scan')
+  );
+  const isKaliSelfBlocked = selfBlockedAlerts.length > 0;
 
   const filteredAlerts = alerts.filter(a => {
     if (filterSeverity === 'critical') return a.severity === 'critical';
@@ -77,6 +86,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Auto-Bloqueio Emergency Notice Banner */}
+      {isKaliSelfBlocked && (
+        <div className="p-4 rounded-xl bg-amber-950/40 border-2 border-amber-500/80 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-in fade-in">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="p-2.5 rounded-lg bg-amber-500/20 text-amber-400 shrink-0">
+              <AlertTriangle className="w-6 h-6 animate-pulse" />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                <span>⚠️ Auto-Bloqueio Detectado: Host Kali Linux Bloqueado no Kernel</span>
+                <span className="text-xs px-2 py-0.5 rounded bg-amber-900/80 text-amber-100 border border-amber-600 font-mono">192.168.0.156</span>
+              </h4>
+              <p className="text-xs text-amber-200/90 mt-1 leading-relaxed">
+                O sniffer Scapy interpretou os pacotes de varredura do seu próprio Kali como um ataque externo e aplicou regras <code className="bg-amber-900/40 px-1 py-0.5 rounded font-mono text-amber-200">DROP</code> no iptables. Comandos estão bloqueados pelo firewall.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => onUnblockHost?.('192.168.0.156')}
+            className="px-4 py-2.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs transition-all shrink-0 flex items-center gap-2 shadow-lg cursor-pointer transform hover:scale-[1.02]"
+          >
+            <Zap className="w-4 h-4 fill-slate-950" />
+            <span>⚡ Desbloquear Meu Kali Linux (Remover DROP)</span>
+          </button>
+        </div>
+      )}
+
       {/* 1. Telemetry KPI Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3.5">
         <div className="p-4 rounded-xl bg-slate-900 border border-slate-800">
@@ -408,7 +444,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                       {/* Mitigation execution buttons */}
                       <div className="flex items-center gap-2 self-end sm:self-start shrink-0">
-                        {isMitigated ? (
+                        {alert.sourceIp === '192.168.0.156' || alert.sourceIp === '127.0.0.1' ? (
+                          <button
+                            onClick={() => onUnblockHost?.(alert.sourceIp)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-amber-950 bg-amber-400 hover:bg-amber-300 transition-colors shadow-sm cursor-pointer"
+                            title="Remover regra DROP do iptables para liberar o Kali"
+                          >
+                            <Zap className="w-3.5 h-3.5 fill-amber-950" />
+                            <span>Desbloquear Kali</span>
+                          </button>
+                        ) : isMitigated ? (
                           <div className="flex items-center gap-2">
                             <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1 bg-emerald-950/40 px-2.5 py-1 rounded border border-emerald-800/50">
                               <CheckCircle2 className="w-3.5 h-3.5" />

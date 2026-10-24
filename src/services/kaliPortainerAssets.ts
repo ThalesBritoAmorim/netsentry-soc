@@ -205,6 +205,35 @@ services:
             return fallback, 'arp'
 
         conn = None
+        # Auto-identificacao das interfaces e IPs do proprio Kali Linux (Self-Protection)
+        LOCAL_HOST_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "192.168.0.156"}
+        LOCAL_HOST_MACS = set()
+
+        def refresh_local_identities():
+            global LOCAL_HOST_IPS, LOCAL_HOST_MACS
+            try:
+                res = subprocess.run("ip -o -f inet addr show | awk '{print $4}'", shell=True, capture_output=True, text=True)
+                for line in res.stdout.strip().split("\n"):
+                    ip_clean = line.split("/")[0].strip()
+                    if ip_clean:
+                        LOCAL_HOST_IPS.add(ip_clean)
+                res_mac = subprocess.run("ip -o link show | awk '{print $17}'", shell=True, capture_output=True, text=True)
+                for m in res_mac.stdout.strip().split("\n"):
+                    m_clean = m.strip().lower()
+                    if len(m_clean) == 17:
+                        LOCAL_HOST_MACS.add(m_clean)
+            except Exception as e:
+                logging.error(f"Erro ao buscar IPs locais: {e}")
+
+        refresh_local_identities()
+
+        # Desbloqueio preventivo na inicializacao para corrigir auto-bloqueios anteriores no kernel
+        for hip in list(LOCAL_HOST_IPS):
+            if hip and hip != "127.0.0.1" and hip != "0.0.0.0":
+                subprocess.run(f"iptables -D INPUT -s {hip} -p tcp --syn -j DROP 2>/dev/null", shell=True)
+                subprocess.run(f"iptables -D INPUT -s {hip} -j DROP 2>/dev/null", shell=True)
+                subprocess.run(f"iptables -D FORWARD -s {hip} -j DROP 2>/dev/null", shell=True)
+
         def init_db():
             global conn
             logging.info(f"Conectando ao PostgreSQL 16 em {DB_HOST}:{DB_PORT}...")
@@ -353,7 +382,9 @@ services:
                 proto = "ARP"
                 info = f"ARP Who has {dst_ip}? Tell {src_ip}"
 
-                if src_ip in arp_cache and arp_cache[src_ip] != src_mac:
+                if src_ip in LOCAL_HOST_IPS or src_mac.lower() in LOCAL_HOST_MACS:
+                    pass
+                elif src_ip in arp_cache and arp_cache[src_ip] != src_mac:
                     logging.warning(f"🚨 ALERTA REAL: Conflito ARP / Spoofing de {src_mac} alegando {src_ip}!")
                     cmd = f"iptables -I INPUT -m mac --mac-source {src_mac} -j DROP"
                     applied = False
@@ -399,23 +430,27 @@ services:
                     info = f"Porta {tcp.sport} -> {tcp.dport} [{tcp.flags}]"
 
                     if tcp.flags == "S":
-                        q = syn_tracker[src_ip]
-                        q.append((now, tcp.dport))
-                        while q and now - q[0][0] > 3.0: q.popleft()
-                        if len(set(p for _, p in q)) > 15:
-                            logging.warning(f"🚨 ALERTA REAL: Varredura de Portas SYN de {src_ip}!")
-                            cmd = f"iptables -A INPUT -s {src_ip} -p tcp --syn -j DROP"
-                            applied = False
-                            if AUTO_MITIGATE:
-                                subprocess.run(cmd, shell=True)
-                                applied = True
-                                metrics["threats_neutralized"] += 1
-                            with conn.cursor() as cur:
-                                cur.execute("""
-                                    INSERT INTO threat_alerts (title, category, severity, source_ip, details, mitigation_command, applied)
-                                    VALUES (%s, %s, %s, %s, %s, %s)
-                                """, ("Varredura SYN Nmap Detectada", "port_scan", "high", src_ip, "Mais de 15 portas distintas escaneadas", cmd, applied))
-                            q.clear()
+                        # PROTECAO DE AUTO-BLOQUEIO: O proprio Kali Linux (192.168.0.156) nunca deve ser bloqueado!
+                        if src_ip in LOCAL_HOST_IPS or src_ip.startswith("127.") or (hasattr(pkt, 'hwsrc') and getattr(pkt, 'hwsrc', '').lower() in LOCAL_HOST_MACS):
+                            pass
+                        else:
+                            q = syn_tracker[src_ip]
+                            q.append((now, tcp.dport))
+                            while q and now - q[0][0] > 3.0: q.popleft()
+                            if len(set(p for _, p in q)) > 15:
+                                logging.warning(f"🚨 ALERTA REAL: Varredura de Portas SYN de {src_ip}!")
+                                cmd = f"iptables -A INPUT -s {src_ip} -p tcp --syn -j DROP"
+                                applied = False
+                                if AUTO_MITIGATE:
+                                    subprocess.run(cmd, shell=True)
+                                    applied = True
+                                    metrics["threats_neutralized"] += 1
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        INSERT INTO threat_alerts (title, category, severity, source_ip, details, mitigation_command, applied)
+                                        VALUES (%s, %s, %s, %s, %s, %s)
+                                    """, ("Varredura SYN Nmap Detectada", "port_scan", "high", src_ip, "Mais de 15 portas distintas escaneadas", cmd, applied))
+                                q.clear()
 
                 elif pkt.haslayer(UDP):
                     proto = "UDP"
@@ -456,6 +491,7 @@ services:
                         "status": "online",
                         "host": "Kali Linux (Local Host)",
                         "interface": IFACE,
+                        "hostIps": list(LOCAL_HOST_IPS),
                         "pps": metrics["pps"],
                         "bandwidthKbps": round((metrics["bytes_last_sec"] * 8) / 1024, 1),
                         "totalPackets": metrics["total_packets"],
@@ -777,6 +813,38 @@ services:
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(json.dumps({"success": True, "ip": ip, "alias": alias}).encode("utf-8"))
+
+                elif self.path == "/api/unblock":
+                    target_ip = payload.get("ip", "192.168.0.156")
+                    logging.info(f"🚨 Desbloqueio emergencial de host requisitado para: {target_ip}")
+                    LOCAL_HOST_IPS.add(target_ip)
+                    # Remove regras de DROP para este IP no kernel Linux
+                    for chain in ["INPUT", "FORWARD"]:
+                        subprocess.run(f"iptables -D {chain} -s {target_ip} -p tcp --syn -j DROP 2>/dev/null", shell=True)
+                        subprocess.run(f"iptables -D {chain} -s {target_ip} -j DROP 2>/dev/null", shell=True)
+                        subprocess.run(f"iptables -D {chain} -d {target_ip} -j DROP 2>/dev/null", shell=True)
+                        try:
+                            subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} -s {target_ip} -p tcp --syn -j DROP 2>/dev/null", shell=True)
+                            subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} -s {target_ip} -j DROP 2>/dev/null", shell=True)
+                        except Exception:
+                            pass
+
+                    # Atualiza PostgreSQL para marcar alertas desse IP como não aplicados/whitelisted
+                    if conn:
+                        try:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE threat_alerts SET applied = FALSE, status = 'whitelisted' WHERE source_ip = %s;", (target_ip,))
+                        except Exception as e:
+                            logging.error(f"Erro ao atualizar alertas no banco: {e}")
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "success": True, 
+                        "unblockedIp": target_ip, 
+                        "message": f"Regras DROP para {target_ip} removidas do iptables com sucesso! Kali restabelecido."
+                    }).encode("utf-8"))
                 else:
                     self.send_response(404)
                     self.end_headers()

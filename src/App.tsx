@@ -78,6 +78,11 @@ export default function App() {
     }
   };
 
+  const handleUnblockHost = async (ip: string = '192.168.0.156') => {
+    await networkEngine.unblockHost(ip);
+    showToast(`Host Kali Linux (${ip}) desbloqueado e adicionado à Whitelist! Regras DROP removidas do Netfilter.`, 'success');
+  };
+
   const handleSimulateAttack = (category: ThreatCategory) => {
     networkEngine.simulateAttack(category);
     showToast(`Anomalia [${category}] injetada no sniffer! Verificando resposta autônoma...`, 'alert');
@@ -181,6 +186,7 @@ export default function App() {
             onNavigateToDevices={() => setActiveTab('devices')}
             onNavigateToDeploy={() => setActiveTab('deploy')}
             onOpenKaliTerminal={handleOpenTerminalWithCommand}
+            onUnblockHost={handleUnblockHost}
           />
         )}
 

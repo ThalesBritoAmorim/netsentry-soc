@@ -8,9 +8,9 @@ export const DEFAULT_ANALYSIS_PARAMETERS: AnalysisParameters = {
   arpSpoofSensitivity: 'strict',
 
   // Network Filters & Whitelists
-  whitelistedIps: ['192.168.1.1', '127.0.0.1', '1.1.1.1', '8.8.8.8'],
+  whitelistedIps: ['192.168.0.156', '192.168.0.1', '192.168.1.1', '127.0.0.1', '1.1.1.1', '8.8.8.8'],
   protectedPorts: [22, 80, 443, 3000, 5432, 8080],
-  monitoredSubnets: ['192.168.1.0/24'],
+  monitoredSubnets: ['192.168.0.0/24', '192.168.1.0/24'],
 
   // AI Forensic Parameters
   forensicDetailLevel: 'deep_forensic',
@@ -32,10 +32,32 @@ class ParametersService {
 
   constructor() {
     this.params = this.load();
+    // Guarantee Kali host IP is always present in whitelist
+    if (!this.params.whitelistedIps.includes('192.168.0.156')) {
+      this.params.whitelistedIps.push('192.168.0.156');
+    }
   }
 
   public get(): AnalysisParameters {
     return { ...this.params };
+  }
+
+  public addWhitelistedIp(ip: string): boolean {
+    const cleanIp = ip.trim();
+    if (!cleanIp || this.params.whitelistedIps.includes(cleanIp)) return false;
+    this.save({ whitelistedIps: [...this.params.whitelistedIps, cleanIp] });
+    return true;
+  }
+
+  public isWhitelisted(ip: string): boolean {
+    if (!ip) return false;
+    const cleanIp = ip.trim();
+    return (
+      cleanIp === '127.0.0.1' ||
+      cleanIp === 'localhost' ||
+      cleanIp === '192.168.0.156' ||
+      this.params.whitelistedIps.includes(cleanIp)
+    );
   }
 
   public save(newParams: Partial<AnalysisParameters>): AnalysisParameters {
