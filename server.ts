@@ -27,6 +27,121 @@ app.get('/api/ai/status', (_req, res) => {
   });
 });
 
+// Kali Host Agent Server-Side Bridge
+// Ensures that remote clients (e.g. Windows on 192.168.1.28:3000)
+// access live telemetry collected on the Kali server, avoiding client-side localhost lookup.
+const KALI_AGENT_HOSTS = [
+  process.env.KALI_AGENT_URL,
+  'http://127.0.0.1:8080',
+  'http://localhost:8080',
+  'http://host.docker.internal:8080'
+].filter(Boolean) as string[];
+
+let currentKaliAgentUrl = KALI_AGENT_HOSTS[0] || 'http://127.0.0.1:8080';
+
+async function queryKaliAgent(endpoint: string, options?: RequestInit) {
+  const hosts = [currentKaliAgentUrl, ...KALI_AGENT_HOSTS.filter(h => h !== currentKaliAgentUrl)];
+  for (const host of hosts) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      const res = await fetch(`${host}${endpoint}`, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          currentKaliAgentUrl = host;
+          return await res.json();
+        }
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+app.get('/api/kali/status', async (_req, res) => {
+  const data = await queryKaliAgent('/api/status');
+  if (data) {
+    return res.json({
+      ...data,
+      isLiveKaliConnected: true,
+      agentHost: currentKaliAgentUrl,
+      serverHost: 'Kali Linux Server'
+    });
+  }
+  // Server-side fallback when daemon is not running yet
+  res.json({
+    isLiveKaliConnected: false,
+    interface: 'eth0',
+    pps: 0,
+    bandwidthKbps: 0,
+    totalPackets: 0,
+    totalThreatsNeutralized: 0,
+    agentHost: currentKaliAgentUrl,
+    message: 'Agente Scapy aguardando conexão na porta 8080 do Kali Linux'
+  });
+});
+
+app.get('/api/kali/devices', async (_req, res) => {
+  const data = await queryKaliAgent('/api/devices');
+  res.json(data || []);
+});
+
+app.get('/api/kali/alerts', async (_req, res) => {
+  const data = await queryKaliAgent('/api/alerts');
+  res.json(data || []);
+});
+
+app.get('/api/kali/traffic', async (_req, res) => {
+  const data = await queryKaliAgent('/api/traffic');
+  res.json(data || []);
+});
+
+app.post('/api/kali/exec', async (req, res) => {
+  const { command } = req.body;
+  const data = await queryKaliAgent('/api/exec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command }),
+  });
+  if (data) {
+    return res.json(data);
+  }
+  res.json({
+    success: false,
+    output: `[NetSentry Kali Bridge] O agente do Kali não respondeu em ${currentKaliAgentUrl}.\nVerifique se o daemon está ativo executando 'python3 netsentry_daemon.py' no terminal do Kali.`
+  });
+});
+
+app.post('/api/kali/command', async (req, res) => {
+  const { command } = req.body;
+  const data = await queryKaliAgent('/api/exec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command }),
+  });
+  if (data) {
+    return res.json(data);
+  }
+  res.json({
+    success: false,
+    output: `[NetSentry Kali Bridge] O agente do Kali não respondeu em ${currentKaliAgentUrl}.\nVerifique se o daemon está ativo executando 'python3 netsentry_daemon.py' no terminal do Kali.`
+  });
+});
+
+app.post('/api/kali/config', (req, res) => {
+  const { hostUrl } = req.body;
+  if (hostUrl && typeof hostUrl === 'string') {
+    currentKaliAgentUrl = hostUrl.trim().replace(/\/$/, '');
+  }
+  res.json({ success: true, currentKaliAgentUrl });
+});
+
 // Real-time AI Forensic Analysis Endpoint
 app.post('/api/ai/analyze', async (req, res) => {
   try {

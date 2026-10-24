@@ -45,7 +45,7 @@ class NetworkEngine {
 
   private subscribers: Set<NetworkEventCallback> = new Set();
   private streamInterval: any = null;
-  private kaliHostUrl: string = 'http://localhost:8080';
+  private kaliHostUrl: string = '/api/kali';
   private kaliPollInterval: any = null;
 
   constructor() {
@@ -60,14 +60,31 @@ class NetworkEngine {
   }
 
   public setKaliHostUrl(url: string) {
-    this.kaliHostUrl = url.trim().replace(/\/$/, '');
+    const cleanUrl = url.trim().replace(/\/$/, '');
+    this.kaliHostUrl = cleanUrl || '/api/kali';
     this.state.metrics.kaliHostUrl = this.kaliHostUrl;
+    // Notify server-side bridge of host URL
+    if (cleanUrl.startsWith('http')) {
+      fetch('/api/kali/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hostUrl: cleanUrl })
+      }).catch(() => {});
+    }
     this.pollRealKali();
     this.notify();
   }
 
   public getKaliHostUrl(): string {
     return this.kaliHostUrl;
+  }
+
+  private getEndpoint(path: string): string {
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    if (this.kaliHostUrl === '/api/kali' || this.kaliHostUrl.endsWith('/api/kali')) {
+      return `/api/kali${cleanPath}`;
+    }
+    return `${this.kaliHostUrl}/api${cleanPath}`;
   }
 
   public subscribe(callback: NetworkEventCallback): () => void {
@@ -114,13 +131,13 @@ class NetworkEngine {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1800);
-      const res = await fetch(`${this.kaliHostUrl}/api/status`, { signal: controller.signal });
+      const res = await fetch(this.getEndpoint('/status'), { signal: controller.signal });
       clearTimeout(timeoutId);
 
       if (res.ok) {
         const data = await res.json();
         const wasDisconnected = !this.state.metrics.isLiveKaliConnected;
-        this.state.metrics.isLiveKaliConnected = true;
+        this.state.metrics.isLiveKaliConnected = Boolean(data.isLiveKaliConnected ?? true);
         this.state.metrics.kaliHostUrl = this.kaliHostUrl;
         this.state.metrics.lastKaliSync = new Date().toLocaleTimeString('pt-BR');
         this.state.metrics.pps = data.pps ?? this.state.metrics.pps;
@@ -140,7 +157,7 @@ class NetworkEngine {
 
         // Fetch real devices from Kali host
         try {
-          const devRes = await fetch(`${this.kaliHostUrl}/api/devices`);
+          const devRes = await fetch(this.getEndpoint('/devices'));
           if (devRes.ok) {
             const devData = await devRes.json();
             if (Array.isArray(devData) && devData.length > 0) {
@@ -151,7 +168,7 @@ class NetworkEngine {
 
         // Fetch real alerts from Kali host
         try {
-          const altRes = await fetch(`${this.kaliHostUrl}/api/alerts`);
+          const altRes = await fetch(this.getEndpoint('/alerts'));
           if (altRes.ok) {
             const altData = await altRes.json();
             if (Array.isArray(altData) && altData.length > 0) {
@@ -162,7 +179,7 @@ class NetworkEngine {
 
         // Fetch real traffic flows from Kali host
         try {
-          const trfRes = await fetch(`${this.kaliHostUrl}/api/traffic`);
+          const trfRes = await fetch(this.getEndpoint('/traffic'));
           if (trfRes.ok) {
             const trfData = await trfRes.json();
             if (Array.isArray(trfData) && trfData.length > 0) {
@@ -574,7 +591,7 @@ class NetworkEngine {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 180000);
-        const res = await fetch(`${this.kaliHostUrl}/api/exec`, {
+        const res = await fetch(this.getEndpoint('/exec'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ command }),
