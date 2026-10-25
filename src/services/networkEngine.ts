@@ -18,6 +18,7 @@ import {
   INITIAL_SYSTEM_METRICS 
 } from './initialData';
 import { parametersService } from './parametersService';
+import { soundAlertService } from './soundAlertService';
 
 // Client-side MAC OUI prefix dictionary for instant local vendor identification
 const CLIENT_OUI_MAP: Record<string, string> = {
@@ -281,7 +282,13 @@ class NetworkEngine {
           if (altRes.ok) {
             const altData = await altRes.json();
             if (Array.isArray(altData) && altData.length > 0) {
+              const prevCount = this.state.alerts.length;
+              const hasNewThreat = altData.length > prevCount && altData.some((a: any) => a.status === 'active' && (a.severity === 'critical' || a.severity === 'high'));
               this.state.alerts = altData;
+              if (hasNewThreat) {
+                const worstSeverity = altData.find((a: any) => a.status === 'active' && a.severity === 'critical') ? 'critical' : 'high';
+                soundAlertService.playThreatAlert(worstSeverity);
+              }
             }
           }
         } catch (e) {}
@@ -555,6 +562,11 @@ class NetworkEngine {
       'warning'
     );
 
+    // Trigger Audible Alert for simulated attack
+    if (alert.severity === 'critical' || alert.severity === 'high') {
+      soundAlertService.playThreatAlert(alert.severity);
+    }
+
     // If autonomous mitigation is enabled and alert is critical/high, execute automatically!
     const params = parametersService.get();
     if (this.state.metrics.autonomousMode && params.autoBlockHighSeverity && alert.playbook.automatedAvailable) {
@@ -602,6 +614,9 @@ class NetworkEngine {
     alert.playbook.appliedAt = new Date().toLocaleTimeString('pt-BR');
     alert.status = 'mitigated';
     this.state.metrics.totalThreatsNeutralized += 1;
+
+    // Trigger audible confirmation chime for SOC operator
+    soundAlertService.playMitigationSuccess();
 
     // Update target device trust level if quarantined
     const dev = this.state.devices.find(d => d.ip === alert.sourceIp);

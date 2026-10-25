@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AnalysisParameters } from '../types';
 import { parametersService, DEFAULT_ANALYSIS_PARAMETERS } from '../services/parametersService';
+import { soundAlertService } from '../services/soundAlertService';
 import { 
   Sliders, 
   Shield, 
@@ -621,26 +622,72 @@ export const AnalysisParametersView: React.FC<AnalysisParametersViewProps> = ({
                 </button>
               </div>
 
-              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Volume2 className="w-4 h-4 text-indigo-400 shrink-0" />
-                  <div>
-                    <span className="font-semibold text-slate-200 block">Sinal Sonoro de Alerta Crítico</span>
-                    <span className="text-[11px] text-slate-400">
-                      Emitir sinal sonoro no navegador quando uma anomalia de severidade crítica for registrada.
-                    </span>
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Volume2 className="w-4 h-4 text-indigo-400 shrink-0" />
+                    <div>
+                      <span className="font-semibold text-slate-200 block">Sinal Sonoro de Alerta Crítico (Web Audio SOC)</span>
+                      <span className="text-[11px] text-slate-400">
+                        Sintetiza sirene tática no navegador quando anomalias de severidade alta/crítica ou picos de tráfego ocorrem.
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !params.enableAudioAlerts;
+                      setParams({ ...params, enableAudioAlerts: next });
+                      soundAlertService.setMuted(!next);
+                      if (next) {
+                        soundAlertService.testSound('warning');
+                        onToast('Alertas sonoros ativados no navegador!', 'success');
+                      } else {
+                        onToast('Alertas sonoros desativados.', 'alert');
+                      }
+                    }}
+                    className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${
+                      params.enableAudioAlerts ? 'bg-indigo-500' : 'bg-slate-800'
+                    }`}
+                  >
+                    <span className={`w-3.5 h-3.5 rounded-full bg-white absolute top-0.5 transition-transform ${
+                      params.enableAudioAlerts ? 'right-0.5' : 'left-0.5'
+                    }`} />
+                  </button>
+                </div>
+
+                {/* Tactical Audio Test Controls */}
+                <div className="pt-2 border-t border-slate-900 flex items-center justify-between flex-wrap gap-2 text-xs">
+                  <span className="text-slate-400 font-mono text-[11px]">Testar Efeitos Sonoros do SOC:</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        soundAlertService.testSound('critical');
+                        onToast('Reproduzindo sirene crítica...', 'alert');
+                      }}
+                      className="px-2.5 py-1 rounded bg-rose-950/70 text-rose-300 border border-rose-800/80 hover:bg-rose-900 transition-colors text-[11px] font-mono"
+                    >
+                      Sirene Crítica
+                    </button>
+                    <button
+                      onClick={() => {
+                        soundAlertService.testSound('warning');
+                        onToast('Reproduzindo bip de alerta...', 'alert');
+                      }}
+                      className="px-2.5 py-1 rounded bg-amber-950/70 text-amber-300 border border-amber-800/80 hover:bg-amber-900 transition-colors text-[11px] font-mono"
+                    >
+                      Alerta Bip
+                    </button>
+                    <button
+                      onClick={() => {
+                        soundAlertService.testSound('success');
+                        onToast('Reproduzindo confirmação de mitigação...', 'success');
+                      }}
+                      className="px-2.5 py-1 rounded bg-emerald-950/70 text-emerald-300 border border-emerald-800/80 hover:bg-emerald-900 transition-colors text-[11px] font-mono"
+                    >
+                      Chime Sucesso
+                    </button>
                   </div>
                 </div>
-                <button
-                  onClick={() => setParams({ ...params, enableAudioAlerts: !params.enableAudioAlerts })}
-                  className={`w-10 h-5 rounded-full transition-colors relative shrink-0 ${
-                    params.enableAudioAlerts ? 'bg-indigo-500' : 'bg-slate-800'
-                  }`}
-                >
-                  <span className={`w-3.5 h-3.5 rounded-full bg-white absolute top-0.5 transition-transform ${
-                    params.enableAudioAlerts ? 'right-0.5' : 'left-0.5'
-                  }`} />
-                </button>
               </div>
             </div>
           </div>

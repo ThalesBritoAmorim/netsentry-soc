@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { Shield, Radio, Terminal, Cpu, Server, CheckCircle2, AlertCircle, Settings, Bot, Sliders } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Shield, Radio, Terminal, Cpu, Server, CheckCircle2, AlertCircle, Settings, Bot, Sliders, Volume2, VolumeX } from 'lucide-react';
+import { soundAlertService } from '../services/soundAlertService';
 
 export type NavTab = 'dashboard' | 'devices' | 'traffic' | 'deploy' | 'reports' | 'ai-integrations' | 'parameters';
 
@@ -28,6 +29,11 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
   const [showConfig, setShowConfig] = useState(false);
   const [inputUrl, setInputUrl] = useState(kaliHostUrl);
+  const [soundMuted, setSoundMuted] = useState(soundAlertService.isMuted());
+
+  useEffect(() => {
+    return soundAlertService.onMuteChange(setSoundMuted);
+  }, []);
 
   const handleSaveUrl = (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,6 +193,25 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               )}
             </div>
+
+            {/* Quick Audio Alert Toggle Button */}
+            <button
+              onClick={() => {
+                const next = soundAlertService.toggleMute();
+                setSoundMuted(next);
+                if (!next) {
+                  soundAlertService.testSound('warning');
+                }
+              }}
+              className={`p-1.5 rounded-md text-xs font-mono border transition-all ${
+                !soundMuted 
+                  ? 'bg-indigo-950/70 border-indigo-700 text-indigo-300' 
+                  : 'bg-slate-900 border-slate-700 text-slate-500 hover:text-slate-300'
+              }`}
+              title={soundMuted ? 'Alerta sonoro mutado (Clique para ativar)' : 'Alerta sonoro ativo'}
+            >
+              {!soundMuted ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+            </button>
 
             {/* Autonomous defence mode toggle */}
             <button

@@ -17,6 +17,7 @@ import { AnalysisParametersView } from './components/AnalysisParametersView';
 import { MitigationModal } from './components/MitigationModal';
 import { AnomalySimulatorModal } from './components/AnomalySimulatorModal';
 import { KaliTerminalDrawer } from './components/KaliTerminalDrawer';
+import { AIForensicModal, AIForensicTargetType } from './components/AIForensicModal';
 import { CheckCircle2, ShieldAlert } from 'lucide-react';
 
 export default function App() {
@@ -25,6 +26,17 @@ export default function App() {
   const [selectedAlertForPlaybook, setSelectedAlertForPlaybook] = useState<ThreatAlert | null>(null);
   const [isSimModalOpen, setIsSimModalOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'alert' } | null>(null);
+
+  // AI Forensic Modal State
+  const [isAIForensicOpen, setIsAIForensicOpen] = useState(false);
+  const [aiForensicTargetType, setAiForensicTargetType] = useState<AIForensicTargetType>('posture');
+  const [aiForensicTargetData, setAiForensicTargetData] = useState<any>(null);
+
+  const handleOpenAIForensic = (type: AIForensicTargetType, data?: any) => {
+    setAiForensicTargetType(type);
+    setAiForensicTargetData(data);
+    setIsAIForensicOpen(true);
+  };
 
   // Terminal Kali State
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
@@ -187,6 +199,7 @@ export default function App() {
             onNavigateToDeploy={() => setActiveTab('deploy')}
             onOpenKaliTerminal={handleOpenTerminalWithCommand}
             onUnblockHost={handleUnblockHost}
+            onOpenAIForensic={handleOpenAIForensic}
           />
         )}
 
@@ -197,6 +210,7 @@ export default function App() {
             onScanSubnet={handleScanSubnet}
             onSetDeviceAlias={handleSetDeviceAlias}
             onOpenKaliTerminal={handleOpenTerminalWithCommand}
+            onOpenAIForensic={handleOpenAIForensic}
           />
         )}
 
@@ -207,6 +221,7 @@ export default function App() {
             isStreaming={engineState.isStreaming}
             onToggleStreaming={() => networkEngine.toggleStreaming()}
             onToggleRule={handleToggleRule}
+            onOpenAIForensic={handleOpenAIForensic}
           />
         )}
 
@@ -268,6 +283,18 @@ export default function App() {
         onClose={() => setIsSimModalOpen(false)}
         onSimulate={handleSimulateAttack}
         autonomousMode={engineState.metrics.autonomousMode}
+      />
+
+      <AIForensicModal
+        isOpen={isAIForensicOpen}
+        onClose={() => setIsAIForensicOpen(false)}
+        targetType={aiForensicTargetType}
+        targetData={aiForensicTargetData}
+        metrics={engineState.metrics}
+        devices={engineState.devices}
+        onOpenKaliTerminal={handleOpenTerminalWithCommand}
+        onApplyMitigation={handleApplyMitigation}
+        onToast={showToast}
       />
 
       <KaliTerminalDrawer

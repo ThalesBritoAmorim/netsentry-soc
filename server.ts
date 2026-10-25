@@ -347,7 +347,7 @@ app.post('/api/kali/config', (req, res) => {
 // Real-time AI Forensic Analysis Endpoint
 app.post('/api/ai/analyze', async (req, res) => {
   try {
-    const { alert, metrics, devices, anonymize, analysisLevel } = req.body;
+    const { alert, device, flow, spike, metrics, devices, anonymize, analysisLevel } = req.body;
 
     if (!process.env.GEMINI_API_KEY) {
       return res.status(503).json({
@@ -360,12 +360,12 @@ app.post('/api/ai/analyze', async (req, res) => {
       'Você é o motor autônomo de inteligência artificial do NetSentry Kali SOC, ' +
       'um analista sênior de segurança ofensiva e defensiva (Blue Team / Threat Hunter). ' +
       'Seu papel é analisar telemetria real de rede, pacotes capturados pelo sniffer Scapy, ' +
-      'e alertas de intrusão no Kali Linux. ' +
+      'picos de throughput, dispositivos na LAN e alertas de intrusão no Kali Linux. ' +
       'Sua resposta deve ser estritamente técnica, precisa, sem enrolações corporativas ou floreios. ' +
       'Forneça sempre: ' +
-      '1. Diagnóstico forense técnico detalhado do comportamento ou anomalia. ' +
+      '1. Diagnóstico forense técnico detalhado do comportamento, anomalia ou risco. ' +
       '2. Classificação de Risco (CRÍTICO, ALTO, MÉDIO, BAIXO ou NOMINAL). ' +
-      '3. Técnica MITRE ATT&CK correspondente (ex: T1557.002, T1046, T1071.004). ' +
+      '3. Técnica MITRE ATT&CK correspondente (ex: T1557.002, T1046, T1071.004, T1498). ' +
       '4. Regra exata e segura para Netfilter/iptables no Linux para mitigar sem derrubar SSH ou o cluster. ' +
       '5. Lista de ações táticas imediatas para o operador de segurança no Kali.';
 
@@ -385,6 +385,44 @@ ALERTA DE SEGURANÇA CAPTURADO:
 - Detalhes do Sniffer: ${alert.details || 'Desvio estatístico na taxa de pacotes'}
 - Confiança do Detector: ${alert.confidence || 95}%
 - Comando sugerido pelo playbook: ${alert.playbook?.iptablesCommand || 'Nenhum'}
+`;
+    } else if (device) {
+      promptContext = `
+AUDITORIA FORENSE DE DISPOSITIVO NA REDE LOCAL (LAN):
+- IP do Host: ${device.ip}
+- Endereço Físico MAC: ${device.mac}
+- Fabricante Detectado (OUI): ${device.vendor || 'Não identificado'}
+- Hostname / NetBIOS / DNS: ${device.hostname || 'Desconhecido'}
+- Classificação: ${device.deviceType || 'Desconhecido'} (Nível de Confiança: ${device.trustLevel || 'unverified'})
+- Threat Score Atual: ${device.threatScore ?? 0}/100
+- Portas Abertas Identificadas: ${Array.isArray(device.openPorts) ? device.openPorts.map((p: any) => `${p.port}/${p.service} (${p.risk})`).join(', ') : 'Nenhuma porta aberta catalogada'}
+- Volume de Tráfego: RX: ${device.rxBytes || 0} bytes, TX: ${device.txBytes || 0} bytes, Pacotes: ${device.packetCount || 0}
+- Notas de Detecção: ${device.notes || 'Sem anotações prévias'}
+`;
+    } else if (flow) {
+      promptContext = `
+INSPEÇÃO FORENSE DE FLUXO / PACOTE DE REDE (SNIFFER SCAPY):
+- Timestamp da Captura: ${flow.timestamp}
+- Protocolo: ${flow.protocol}
+- Origem: ${flow.srcIp}${flow.srcPort ? `:${flow.srcPort}` : ''}
+- Destino: ${flow.dstIp}${flow.dstPort ? `:${flow.dstPort}` : ''}
+- Tamanho do Pacote: ${flow.packetLength} bytes
+- Flags TCP/IP: ${flow.flags || 'Nenhuma'}
+- Carga Útil / Info: ${flow.info}
+- Classificação Heurística: ${flow.isSuspicious ? 'SUSPEITO / ANÔMALO' : 'Legítimo'}
+- Motivo da Anomalia: ${flow.anomalyReason || 'Padrão fora da baseline estatística'}
+`;
+    } else if (spike) {
+      promptContext = `
+DIAGNÓSTICO FORENSE DE PICO DE VAZÃO / SURTO VOLUMÉTRICO:
+- Timestamp do Pico: ${spike.timeStr || new Date().toLocaleTimeString()}
+- Vazão no Pico: ${spike.bps ? `${(spike.bps / 1_000_000).toFixed(2)} Mbps (${spike.bps.toLocaleString()} bps)` : 'N/A'}
+- Taxa de Pacotes no Momento: ${spike.pps || metrics?.pps || 0} pacotes/s
+- Desvio em relação à Média Móvel: +${spike.spikeRatio ? Math.round((spike.spikeRatio - 1) * 100) : 150}% acima da baseline
+- Motivo Indicado: ${spike.spikeReason || 'Surto anômalo de pacotes'}
+- PPS Médio Atual do Sistema: ${metrics?.pps || 0} pps
+- Vazão Média Atual: ${metrics?.bandwidthKbps || 0} KB/s
+- Interface de Monitoramento: ${metrics?.sniffingInterface || 'eth0'}
 `;
     } else {
       promptContext = `

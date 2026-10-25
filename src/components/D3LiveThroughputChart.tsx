@@ -31,11 +31,14 @@ export interface ThroughputDataPoint {
   spikeReason?: string;
 }
 
+import { soundAlertService } from '../services/soundAlertService';
+
 interface D3LiveThroughputChartProps {
   metrics: SystemMetrics;
   alerts?: ThreatAlert[];
   trafficFlows?: TrafficFlow[];
   onOpenKaliTerminal?: (cmd: string) => void;
+  onOpenAIForensic?: (type: 'spike', data: any) => void;
   className?: string;
 }
 
@@ -47,6 +50,7 @@ export const D3LiveThroughputChart: React.FC<D3LiveThroughputChartProps> = ({
   alerts = [],
   trafficFlows = [],
   onOpenKaliTerminal,
+  onOpenAIForensic,
   className = ''
 }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -178,6 +182,9 @@ export const D3LiveThroughputChart: React.FC<D3LiveThroughputChartProps> = ({
           } else {
             spikeSeverity = 'moderate';
             spikeReason = `Pico Moderado Detectado: ${(ratio).toFixed(1)}x`;
+          }
+          if (isSpike) {
+            soundAlertService.playSpikePing();
           }
         }
 
@@ -637,6 +644,24 @@ export const D3LiveThroughputChart: React.FC<D3LiveThroughputChartProps> = ({
               <option value="low" className="bg-slate-900 text-slate-200">Baixa (+110%)</option>
             </select>
           </div>
+
+          {/* AI Spike Diagnostic CTA */}
+          {onOpenAIForensic && (
+            <button
+              onClick={() => onOpenAIForensic('spike', {
+                bps: stats.current,
+                pps: metrics.pps,
+                timeStr: new Date().toLocaleTimeString(),
+                spikeRatio: stats.current / Math.max(1, stats.avg),
+                spikeReason: stats.spikeCount > 0 ? `${stats.spikeCount} pico(s) registrados na janela recente` : 'Vazão contínua em tempo real'
+              })}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 transition-colors shadow-sm font-sans"
+              title="Diagnosticar comportamento de vazão e picos com IA Gemini"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Diagnóstico IA</span>
+            </button>
+          )}
 
           {/* Test Spike Action */}
           <button

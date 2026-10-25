@@ -26,7 +26,8 @@ import {
   Edit3,
   Save,
   Globe,
-  Network
+  Network,
+  Sparkles
 } from 'lucide-react';
 
 interface DevicesViewProps {
@@ -35,6 +36,7 @@ interface DevicesViewProps {
   onScanSubnet: (deep?: boolean) => void;
   onSetDeviceAlias?: (deviceId: string, alias: string) => void;
   onOpenKaliTerminal?: (cmd: string) => void;
+  onOpenAIForensic?: (type: 'device', device: NetworkDevice) => void;
 }
 
 export const DevicesView: React.FC<DevicesViewProps> = ({
@@ -42,7 +44,8 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
   onSetTrustLevel,
   onScanSubnet,
   onSetDeviceAlias,
-  onOpenKaliTerminal
+  onOpenKaliTerminal,
+  onOpenAIForensic
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
@@ -176,6 +179,21 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {onOpenAIForensic && (
+            <button
+              onClick={() => {
+                const targetDev = selectedDevice || devices.find(d => d.threatScore > 30) || devices[0];
+                if (targetDev) onOpenAIForensic('device', targetDev);
+              }}
+              disabled={devices.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-950/90 text-cyan-300 border border-cyan-800 hover:bg-cyan-900 transition-colors shadow-sm disabled:opacity-50"
+              title="Auditoria Forense de Topologia e Dispositivos com IA Gemini"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Auditar com IA</span>
+            </button>
+          )}
+
           <button
             onClick={() => onScanSubnet(false)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors shadow-sm"
@@ -601,6 +619,28 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
                   <p className="text-slate-500 italic">Nenhuma porta aberta detectada no scan.</p>
                 )}
               </div>
+
+              {/* AI Host Risk Forensic Analysis CTA */}
+              {onOpenAIForensic && (
+                <div className="p-3.5 bg-gradient-to-r from-cyan-950/70 via-slate-900 to-indigo-950/70 border border-cyan-800/80 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+                  <div>
+                    <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4 text-cyan-400" />
+                      <span>Diagnóstico de Risco do Host com IA</span>
+                    </span>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Auditar portas, perfil do fabricante IEEE OUI e calcular probabilidade de comprometimento.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => onOpenAIForensic('device', selectedDevice)}
+                    className="px-3.5 py-1.5 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-bold text-xs transition-colors shrink-0 flex items-center gap-1.5 shadow-sm self-start sm:self-auto"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-slate-950" />
+                    <span>Auditar Host com IA</span>
+                  </button>
+                </div>
+              )}
 
               {/* Kali Linux Direct Forensic Commands with 1-Click Execution */}
               <div className="space-y-2.5">

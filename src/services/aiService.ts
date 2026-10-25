@@ -382,6 +382,200 @@ class AIService {
     };
   }
 
+  // Analyze a Specific Network Device (LAN Host Audit)
+  public async analyzeDevice(device: any, allDevices?: any[]): Promise<{
+    analysis: string;
+    riskLevel: string;
+    mitreTechnique: string;
+    validatedIptablesCommand: string;
+    recommendedActions: string[];
+    providerUsed: string;
+    modelUsed: string;
+    isAirGapped: boolean;
+  }> {
+    if (this.settings.activeProvider === 'gemini' && !this.settings.strictOfflineMode) {
+      try {
+        const res = await fetch('/api/ai/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            device,
+            devices: allDevices,
+            anonymize: this.settings.anonymizeNetworkData,
+            analysisLevel: 'Auditoria de Dispositivo & Perfil de Risco'
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
+            return {
+              analysis: data.analysis,
+              riskLevel: data.riskLevel,
+              mitreTechnique: data.mitreTechnique,
+              validatedIptablesCommand: data.validatedIptablesCommand,
+              recommendedActions: data.recommendedActions,
+              providerUsed: 'Google Gemini (API Integrada)',
+              modelUsed: data.modelUsed || 'gemini-3.8-flash',
+              isAirGapped: false
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao chamar /api/ai/analyze para dispositivo:', err);
+      }
+    }
+
+    const isHighRisk = (device.threatScore || 0) > 40 || device.trustLevel === 'quarantined';
+    return {
+      analysis: `[Auditoria Forense de Dispositivo - ${device.hostname || device.ip}]\n` +
+        `Host com IP ${device.ip} e MAC ${device.mac} (${device.vendor || 'Dispositivo de Rede'}). ` +
+        `Nível de confiança atual: ${device.trustLevel || 'unverified'}. Threat Score: ${device.threatScore || 0}/100.\n` +
+        `Portas catalogadas: ${device.openPorts?.map((p: any) => `${p.port}/${p.service}`).join(', ') || 'Nenhuma porta pública'}.\n` +
+        `${isHighRisk ? 'Atenção: Dispositivo com pontuação de ameaça elevada ou comportamento anômalo registrado.' : 'Perfil de tráfego dentro dos parâmetros normais da LAN.'}`,
+      riskLevel: isHighRisk ? 'ALTO' : 'NOMINAL',
+      mitreTechnique: 'T1046 - Network Service Discovery',
+      validatedIptablesCommand: `sudo nmap -sV -sC -O -Pn ${device.ip}`,
+      recommendedActions: [
+        `Executar varredura aprofundada de portas no host ${device.ip} via terminal Kali`,
+        `Verificar se o MAC ${device.mac} está autorizado nas concessões do roteador`,
+        device.threatScore > 50 ? `Isolar host temporariamente: sudo iptables -A INPUT -s ${device.ip} -j DROP` : 'Monitorar fluxos na aba de Tráfego'
+      ],
+      providerUsed: 'Google Gemini',
+      modelUsed: this.settings.selectedModel,
+      isAirGapped: this.settings.strictOfflineMode
+    };
+  }
+
+  // Analyze a specific suspicious or inspected packet flow
+  public async analyzeFlow(flow: any, metrics?: any): Promise<{
+    analysis: string;
+    riskLevel: string;
+    mitreTechnique: string;
+    validatedIptablesCommand: string;
+    recommendedActions: string[];
+    providerUsed: string;
+    modelUsed: string;
+    isAirGapped: boolean;
+  }> {
+    if (this.settings.activeProvider === 'gemini' && !this.settings.strictOfflineMode) {
+      try {
+        const res = await fetch('/api/ai/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            flow,
+            metrics,
+            anonymize: this.settings.anonymizeNetworkData,
+            analysisLevel: 'Inspeção Forense de Pacote / Fluxo'
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
+            return {
+              analysis: data.analysis,
+              riskLevel: data.riskLevel,
+              mitreTechnique: data.mitreTechnique,
+              validatedIptablesCommand: data.validatedIptablesCommand,
+              recommendedActions: data.recommendedActions,
+              providerUsed: 'Google Gemini (API Integrada)',
+              modelUsed: data.modelUsed || 'gemini-3.8-flash',
+              isAirGapped: false
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao chamar /api/ai/analyze para fluxo:', err);
+      }
+    }
+
+    return {
+      analysis: `[Inspeção de Fluxo Scapy - ${flow.protocol}]\n` +
+        `Pacote capturado em ${flow.timestamp}: Origem ${flow.srcIp}${flow.srcPort ? `:${flow.srcPort}` : ''} -> Destino ${flow.dstIp}${flow.dstPort ? `:${flow.dstPort}` : ''}.\n` +
+        `Tamanho: ${flow.packetLength} bytes | Flags: ${flow.flags || 'N/A'}.\n` +
+        `Info: ${flow.info}\n` +
+        `${flow.isSuspicious ? `Alerta de Anomalia: ${flow.anomalyReason || 'Padrão suspeito'}. Requer inspeção de cabeçalhos e validação de porta.` : 'Tráfego regular dentro da janela nominal de comunicação.'}`,
+      riskLevel: flow.isSuspicious ? 'ALTO' : 'BAIXO',
+      mitreTechnique: flow.protocol === 'ARP' ? 'T1557.002 - ARP Poisoning' : flow.protocol === 'DNS' ? 'T1071.004 - DNS Exfiltration' : 'T1046 - Network Discovery',
+      validatedIptablesCommand: flow.isSuspicious ? `sudo iptables -A INPUT -s ${flow.srcIp} -j DROP` : `sudo tcpdump -i any host ${flow.srcIp} -c 10 -v`,
+      recommendedActions: [
+        `Inspecionar pacotes ao vivo da origem ${flow.srcIp} com tcpdump`,
+        flow.isSuspicious ? `Aplicar regra de bloqueio para o IP ${flow.srcIp}` : 'Manter registro no histórico de auditoria',
+        'Validar porta e serviço correspondente na tabela IANA'
+      ],
+      providerUsed: 'Google Gemini',
+      modelUsed: this.settings.selectedModel,
+      isAirGapped: this.settings.strictOfflineMode
+    };
+  }
+
+  // Analyze a live Throughput Spike from D3 Chart
+  public async analyzeSpike(spikeData: any, metrics?: any, alerts?: any[]): Promise<{
+    analysis: string;
+    riskLevel: string;
+    mitreTechnique: string;
+    validatedIptablesCommand: string;
+    recommendedActions: string[];
+    providerUsed: string;
+    modelUsed: string;
+    isAirGapped: boolean;
+  }> {
+    if (this.settings.activeProvider === 'gemini' && !this.settings.strictOfflineMode) {
+      try {
+        const res = await fetch('/api/ai/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            spike: spikeData,
+            metrics,
+            alerts,
+            anonymize: this.settings.anonymizeNetworkData,
+            analysisLevel: 'Diagnóstico Forense de Surto Volumétrico'
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
+            return {
+              analysis: data.analysis,
+              riskLevel: data.riskLevel,
+              mitreTechnique: data.mitreTechnique,
+              validatedIptablesCommand: data.validatedIptablesCommand,
+              recommendedActions: data.recommendedActions,
+              providerUsed: 'Google Gemini (API Integrada)',
+              modelUsed: data.modelUsed || 'gemini-3.8-flash',
+              isAirGapped: false
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao chamar /api/ai/analyze para pico:', err);
+      }
+    }
+
+    const bpsFmt = spikeData.bps >= 1_000_000 ? `${(spikeData.bps / 1_000_000).toFixed(2)} Mbps` : `${Math.round(spikeData.bps / 1000)} Kbps`;
+    return {
+      analysis: `[Diagnóstico Forense de Surto de Tráfego]\n` +
+        `Pico detectado às ${spikeData.timeStr || 'recente'}: Vazão atingiu ${bpsFmt} com ${spikeData.pps || metrics?.pps || 0} PPS.\n` +
+        `O desvio representa um aumento súbito superior à média móvel estabelecida pelo algoritmo estatístico.\n` +
+        `Possíveis causas: Varredura maciça de portas (SYN scan), rajada de streaming multimídia ou tentativa de ataque volumétrico (DDoS/Flood).`,
+      riskLevel: spikeData.spikeSeverity === 'critical' ? 'CRÍTICO' : 'ALTO',
+      mitreTechnique: 'T1498.001 - Network Denial of Service: Direct Flood',
+      validatedIptablesCommand: 'sudo sysctl -w net.ipv4.tcp_syncookies=1 && sudo iptables -A INPUT -p tcp --syn -m limit --limit 25/s --limit-burst 50 -j ACCEPT',
+      recommendedActions: [
+        'Habilitar TCP SYN Cookies no kernel Linux para mitigar exaustão de conexões',
+        'Inspecionar fluxos de maior volume na aba Tráfego & Anomalias',
+        'Verificar se o IP emissor está na Whitelist antes de aplicar bloqueio em massa'
+      ],
+      providerUsed: 'Google Gemini',
+      modelUsed: this.settings.selectedModel,
+      isAirGapped: this.settings.strictOfflineMode
+    };
+  }
+
   // Audit and sanity-check an iptables command
   public async auditIptablesRule(cmd: string): Promise<{
     isValid: boolean;

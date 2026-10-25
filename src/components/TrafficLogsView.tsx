@@ -11,7 +11,8 @@ import {
   CheckCircle2, 
   SlidersHorizontal,
   FileText,
-  Search
+  Search,
+  Sparkles
 } from 'lucide-react';
 
 interface TrafficLogsViewProps {
@@ -20,6 +21,7 @@ interface TrafficLogsViewProps {
   isStreaming: boolean;
   onToggleStreaming: () => void;
   onToggleRule: (ruleId: string, enabled: boolean) => void;
+  onOpenAIForensic?: (type: 'flow', flow: TrafficFlow) => void;
 }
 
 export const TrafficLogsView: React.FC<TrafficLogsViewProps> = ({
@@ -27,7 +29,8 @@ export const TrafficLogsView: React.FC<TrafficLogsViewProps> = ({
   rules,
   isStreaming,
   onToggleStreaming,
-  onToggleRule
+  onToggleRule,
+  onOpenAIForensic
 }) => {
   const [filterProto, setFilterProto] = useState<string>('all');
   const [onlySuspicious, setOnlySuspicious] = useState(false);
@@ -76,7 +79,22 @@ export const TrafficLogsView: React.FC<TrafficLogsViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          {onOpenAIForensic && (
+            <button
+              onClick={() => {
+                const targetFlow = filteredFlows.find(f => f.isSuspicious) || filteredFlows[0];
+                if (targetFlow) onOpenAIForensic('flow', targetFlow);
+              }}
+              disabled={filteredFlows.length === 0}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-950/90 text-cyan-300 border border-cyan-800 hover:bg-cyan-900 transition-colors disabled:opacity-50 shadow-sm"
+              title="Inspecionar e analisar fluxo de pacotes com IA Gemini"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Auditoria IA de Fluxos</span>
+            </button>
+          )}
+
           <button
             onClick={() => setShowRulesDrawer(!showRulesDrawer)}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
@@ -222,12 +240,13 @@ export const TrafficLogsView: React.FC<TrafficLogsViewProps> = ({
                 <th className="py-2.5 px-3">Tamanho</th>
                 <th className="py-2.5 px-3">Flags</th>
                 <th className="py-2.5 px-3">Informação / Análise</th>
+                <th className="py-2.5 px-3 text-right">Ação IA</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-slate-300">
               {filteredFlows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-16 text-center text-slate-400 font-sans">
+                  <td colSpan={8} className="py-16 text-center text-slate-400 font-sans">
                     <div className="max-w-md mx-auto space-y-2">
                       <Activity className="w-8 h-8 text-cyan-400 mx-auto" />
                       <div className="text-sm font-semibold text-slate-200">
@@ -292,6 +311,23 @@ export const TrafficLogsView: React.FC<TrafficLogsViewProps> = ({
                       <div className="text-[11px] text-rose-400 font-mono mt-0.5">
                         motivo: {flow.anomalyReason}
                       </div>
+                    )}
+                  </td>
+
+                  <td className="py-2 px-3 text-right whitespace-nowrap font-sans">
+                    {onOpenAIForensic && (
+                      <button
+                        onClick={() => onOpenAIForensic('flow', flow)}
+                        className={`px-2 py-1 rounded text-[11px] font-semibold border transition-colors inline-flex items-center gap-1 shadow-sm ${
+                          flow.isSuspicious 
+                            ? 'bg-rose-950/80 text-rose-300 border-rose-800 hover:bg-rose-900' 
+                            : 'bg-cyan-950/70 text-cyan-300 border-cyan-800/80 hover:bg-cyan-900'
+                        }`}
+                        title="Inspecionar pacote e diagnosticar anomalia com IA"
+                      >
+                        <Sparkles className="w-3 h-3 text-cyan-400" />
+                        <span>Analisar IA</span>
+                      </button>
                     )}
                   </td>
                 </tr>

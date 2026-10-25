@@ -26,8 +26,12 @@ import {
   Split,
   Maximize2,
   BarChart2,
-  Radio
+  Radio,
+  Sparkles,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
+import { soundAlertService } from '../services/soundAlertService';
 import { D3LiveThroughputChart } from './D3LiveThroughputChart';
 import { NetworkTrafficChart } from './NetworkTrafficChart';
 import { IncidentHeatmapChart } from './IncidentHeatmapChart';
@@ -46,6 +50,7 @@ interface DashboardViewProps {
   onNavigateToDeploy: () => void;
   onOpenKaliTerminal?: (cmd: string) => void;
   onUnblockHost?: (ip: string) => void;
+  onOpenAIForensic?: (type: 'threat' | 'device' | 'flow' | 'spike' | 'posture', data?: any) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -60,8 +65,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onNavigateToDevices,
   onNavigateToDeploy,
   onOpenKaliTerminal,
-  onUnblockHost
+  onUnblockHost,
+  onOpenAIForensic
 }) => {
+  const [soundMuted, setSoundMuted] = useState(soundAlertService.isMuted());
+
+  React.useEffect(() => {
+    return soundAlertService.onMuteChange(setSoundMuted);
+  }, []);
   const [filterSeverity, setFilterSeverity] = useState<'all' | 'critical' | 'high' | 'active'>('all');
   const [analyticsLayout, setAnalyticsLayout] = useState<'split' | 'd3' | 'traffic' | 'heatmap'>('split');
 
@@ -213,7 +224,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          {/* Audio Alert Status & Test Action */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
+            <button
+              onClick={() => {
+                const next = soundAlertService.toggleMute();
+                setSoundMuted(next);
+                if (!next) {
+                  soundAlertService.testSound('warning');
+                }
+              }}
+              className={`flex items-center gap-1 font-mono transition-colors ${
+                !soundMuted ? 'text-indigo-300 hover:text-indigo-200' : 'text-slate-500 hover:text-slate-300'
+              }`}
+              title={soundMuted ? 'Alerta sonoro mutado. Clique para ativar som.' : 'Alerta sonoro ativo'}
+            >
+              {!soundMuted ? <Volume2 className="w-3.5 h-3.5 text-indigo-400" /> : <VolumeX className="w-3.5 h-3.5 text-slate-500" />}
+              <span className="hidden sm:inline">{!soundMuted ? 'Som: ATIVO' : 'Som: MUDO'}</span>
+            </button>
+            <button
+              onClick={() => soundAlertService.testSound('critical')}
+              className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 hover:text-white border border-slate-700 transition-colors ml-1 font-mono"
+              title="Testar sirene crítica do SOC"
+            >
+              Testar
+            </button>
+          </div>
+
           <button
             onClick={onNavigateToDeploy}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 transition-colors"
@@ -306,6 +344,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 alerts={alerts} 
                 trafficFlows={trafficFlows} 
                 onOpenKaliTerminal={onOpenKaliTerminal}
+                onOpenAIForensic={onOpenAIForensic}
               />
             </div>
             <div className="min-w-0 w-full overflow-hidden">
@@ -322,6 +361,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               alerts={alerts} 
               trafficFlows={trafficFlows} 
               onOpenKaliTerminal={onOpenKaliTerminal}
+              onOpenAIForensic={onOpenAIForensic}
             />
           </div>
         ) : analyticsLayout === 'traffic' ? (
@@ -364,38 +404,51 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </p>
             </div>
 
-            {/* Segmented Filter Control */}
-            <div className="flex items-center gap-1 p-1 bg-slate-900 rounded-lg border border-slate-800 self-start sm:self-auto">
-              <button
-                onClick={() => setFilterSeverity('all')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                  filterSeverity === 'all'
-                    ? 'bg-slate-800 text-slate-100'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Todos
-              </button>
-              <button
-                onClick={() => setFilterSeverity('active')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                  filterSeverity === 'active'
-                    ? 'bg-slate-800 text-slate-100'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Ativos ({activeAlerts.length})
-              </button>
-              <button
-                onClick={() => setFilterSeverity('critical')}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                  filterSeverity === 'critical'
-                    ? 'bg-slate-800 text-rose-300'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Críticos ({criticalCount})
-              </button>
+            <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+              {onOpenAIForensic && (
+                <button
+                  onClick={() => onOpenAIForensic('posture')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-cyan-300 bg-cyan-950/80 border border-cyan-800 hover:bg-cyan-900 rounded-lg transition-colors shadow-sm"
+                  title="Auditoria Global de Postura da Rede com IA Gemini"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Auditoria Postura IA</span>
+                </button>
+              )}
+
+              {/* Segmented Filter Control */}
+              <div className="flex items-center gap-1 p-1 bg-slate-900 rounded-lg border border-slate-800">
+                <button
+                  onClick={() => setFilterSeverity('all')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    filterSeverity === 'all'
+                      ? 'bg-slate-800 text-slate-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Todos
+                </button>
+                <button
+                  onClick={() => setFilterSeverity('active')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    filterSeverity === 'active'
+                      ? 'bg-slate-800 text-slate-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Ativos ({activeAlerts.length})
+                </button>
+                <button
+                  onClick={() => setFilterSeverity('critical')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    filterSeverity === 'critical'
+                      ? 'bg-slate-800 text-rose-300'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Críticos ({criticalCount})
+                </button>
+              </div>
             </div>
           </div>
 
@@ -497,6 +550,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           >
                             <Zap className="w-3.5 h-3.5 fill-slate-950" />
                             <span>Mitigar</span>
+                          </button>
+                        )}
+
+                        {onOpenAIForensic && (
+                          <button
+                            onClick={() => onOpenAIForensic('threat', alert)}
+                            className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-cyan-300 bg-cyan-950/80 border border-cyan-800 hover:bg-cyan-900 transition-colors flex items-center gap-1 shadow-sm"
+                            title="Diagnóstico Forense Aprofundado com IA Gemini"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                            <span>Diagnóstico IA</span>
                           </button>
                         )}
 
