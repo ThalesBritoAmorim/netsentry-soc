@@ -247,11 +247,14 @@ export interface WebScanResult {
   sslStatus: {
     valid: boolean;
     issuer?: string;
+    subject?: string;
     daysRemaining?: number;
     protocol?: string;
+    cipher?: string;
     error?: string;
   };
   vulnerabilities: WebVulnerability[];
+  totalFoundUnfiltered?: number;
   aiExecutiveSummary?: string;
   aiRemediationRoadmap?: string[];
 }

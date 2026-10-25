@@ -9,8 +9,10 @@ import {
   ThreatCategory,
   WebScanResult,
   WebSeverityFilter,
+  WebVulnerability,
   EquipmentProfile,
   EquipmentCredential,
+  NetworkAuditIssue,
   NetworkDiagnosticResult
 } from '../types';
 import { 
@@ -1291,7 +1293,7 @@ class NetworkEngine {
         brand: 'mikrotik',
         model: 'CCR2004-16G-2S+ / RB4011',
         expectedIp: '192.168.0.1',
-        expectedRole: 'edge_router',
+        expectedRole: 'gateway',
         firmwareVersion: 'RouterOS 7.14',
         notes: 'Roteador de borda e servidor DHCP principal'
       },

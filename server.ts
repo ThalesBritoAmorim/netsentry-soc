@@ -6,6 +6,29 @@ import tls from 'tls';
 import net from 'net';
 
 const app = express();
+app.disable('x-powered-by');
+
+// Security Hardening Middleware (CWE-200, CWE-552, CWE-1021)
+app.use((req, res, next) => {
+  // 1. Bloqueio Crítico de Arquivos Ocultos e Sensíveis (.env, .git, etc.)
+  if (req.path.match(/\/\.(?!well-known)/)) {
+    return res.status(404).send('Not Found');
+  }
+
+  // 2. Cabeçalhos HTTP Defensivos
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+
+  // Proteção contra Clickjacking
+  // Em produção independente aplica SAMEORIGIN
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  }
+
+  next();
+});
+
 app.use(express.json());
 
 // Initialize Google GenAI client with official header

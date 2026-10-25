@@ -880,10 +880,18 @@ def run_network_audit_py():
     }
 
 class RestApiHandler(BaseHTTPRequestHandler):
+    # Ocultar versão do servidor e do Python (CWE-200)
+    server_version = "NetSentry"
+    sys_version = ""
+
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        # Cabeçalhos Defensivos de Segurança (CWE-1021, OWASP Top 10)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
         super().end_headers()
 
     def do_OPTIONS(self):
@@ -892,6 +900,9 @@ class RestApiHandler(BaseHTTPRequestHandler):
 
     def _normalize_path(self):
         path = self.path.split("?")[0]
+        # Bloqueio de arquivos ocultos e sensíveis (.env, .git)
+        if "/." in path and not "/.well-known" in path:
+            return "/blocked_dotfile"
         # Suporta tanto /api/kali/... quanto /api/...
         if path.startswith("/api/kali/"):
             return "/api/" + path[len("/api/kali/"):]
