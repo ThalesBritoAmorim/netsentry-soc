@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Radio, Terminal, Cpu, Server, CheckCircle2, AlertCircle, Settings, Bot, Sliders, Volume2, VolumeX } from 'lucide-react';
+import { Shield, Radio, Terminal, Cpu, Server, CheckCircle2, AlertCircle, Settings, Bot, Sliders, Volume2, VolumeX, Globe, Network } from 'lucide-react';
 import { soundAlertService } from '../services/soundAlertService';
 
-export type NavTab = 'dashboard' | 'devices' | 'traffic' | 'deploy' | 'reports' | 'ai-integrations' | 'parameters';
+export type NavTab = 'dashboard' | 'devices' | 'traffic' | 'web-scanner' | 'network-audit' | 'deploy' | 'reports' | 'ai-integrations' | 'parameters';
 
 interface NavbarProps {
   activeTab: NavTab;
@@ -44,7 +44,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   return (
     <header className="border-b border-slate-800 bg-slate-950/90 backdrop-blur-md sticky top-0 z-40">
       <div className="max-w-[1600px] mx-auto px-3 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between gap-8 h-16">
+        <div className="flex items-center justify-between gap-6 h-16">
           {/* Zone 1: Single Brand Wordmark Element */}
           <div className="flex items-center gap-3 shrink-0">
             <div className="w-8 h-8 rounded-lg bg-cyan-950 border border-cyan-800 flex items-center justify-center text-cyan-400">
@@ -58,8 +58,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             </span>
           </div>
 
-          {/* Zone 2: 5 Concise Single-Line Navigation Links */}
-          <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
+          {/* Zone 2: Navigation Links */}
+          <nav className="hidden lg:flex items-center gap-5 text-sm font-medium text-slate-400 overflow-x-auto">
             <button
               onClick={() => onTabChange('dashboard')}
               className={`whitespace-nowrap transition-colors pb-0.5 ${
@@ -78,7 +78,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   : 'hover:text-slate-200'
               }`}
             >
-              Dispositivos & Mapa
+              Dispositivos
             </button>
             <button
               onClick={() => onTabChange('traffic')}
@@ -91,6 +91,28 @@ export const Navbar: React.FC<NavbarProps> = ({
               Tráfego & Anomalias
             </button>
             <button
+              onClick={() => onTabChange('web-scanner')}
+              className={`whitespace-nowrap transition-colors pb-0.5 flex items-center gap-1.5 ${
+                activeTab === 'web-scanner'
+                  ? 'text-cyan-400 border-b-2 border-cyan-400'
+                  : 'hover:text-slate-200'
+              }`}
+            >
+              <Globe className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Scan de Sites</span>
+            </button>
+            <button
+              onClick={() => onTabChange('network-audit')}
+              className={`whitespace-nowrap transition-colors pb-0.5 flex items-center gap-1.5 ${
+                activeTab === 'network-audit'
+                  ? 'text-cyan-400 border-b-2 border-cyan-400'
+                  : 'hover:text-slate-200'
+              }`}
+            >
+              <Network className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Diagnóstico de Rede</span>
+            </button>
+            <button
               onClick={() => onTabChange('deploy')}
               className={`whitespace-nowrap transition-colors pb-0.5 ${
                 activeTab === 'deploy'
@@ -98,7 +120,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   : 'hover:text-slate-200'
               }`}
             >
-              Deploy Portainer / Kali
+              Portainer
             </button>
             <button
               onClick={() => onTabChange('reports')}
@@ -108,7 +130,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   : 'hover:text-slate-200'
               }`}
             >
-              Relatórios & Backups
+              Relatórios
             </button>
             <button
               onClick={() => onTabChange('ai-integrations')}
@@ -119,7 +141,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               }`}
             >
               <Bot className="w-3.5 h-3.5" />
-              <span>IA & Modelos</span>
+              <span>IA</span>
             </button>
             <button
               onClick={() => onTabChange('parameters')}
@@ -271,10 +293,22 @@ export const Navbar: React.FC<NavbarProps> = ({
             Tráfego
           </button>
           <button
+            onClick={() => onTabChange('web-scanner')}
+            className={`whitespace-nowrap ${activeTab === 'web-scanner' ? 'text-cyan-400 font-bold' : ''}`}
+          >
+            Scan Web
+          </button>
+          <button
+            onClick={() => onTabChange('network-audit')}
+            className={`whitespace-nowrap ${activeTab === 'network-audit' ? 'text-cyan-400 font-bold' : ''}`}
+          >
+            Diagnóstico Rede
+          </button>
+          <button
             onClick={() => onTabChange('deploy')}
             className={`whitespace-nowrap ${activeTab === 'deploy' ? 'text-cyan-400 font-bold' : ''}`}
           >
-            Portainer & Kali
+            Portainer
           </button>
           <button
             onClick={() => onTabChange('reports')}

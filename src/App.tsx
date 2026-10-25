@@ -10,6 +10,8 @@ import { Navbar, NavTab } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
 import { DevicesView } from './components/DevicesView';
 import { TrafficLogsView } from './components/TrafficLogsView';
+import { WebScannerView } from './components/WebScannerView';
+import { NetworkAuditView } from './components/NetworkAuditView';
 import { PortainerDeployView } from './components/PortainerDeployView';
 import { ReportsBackupView } from './components/ReportsBackupView';
 import { AIIntegrationsView } from './components/AIIntegrationsView';
@@ -222,6 +224,20 @@ export default function App() {
             onToggleStreaming={() => networkEngine.toggleStreaming()}
             onToggleRule={handleToggleRule}
             onOpenAIForensic={handleOpenAIForensic}
+          />
+        )}
+
+        {activeTab === 'web-scanner' && (
+          <WebScannerView
+            onOpenKaliTerminal={handleOpenTerminalWithCommand}
+            onToast={showToast}
+          />
+        )}
+
+        {activeTab === 'network-audit' && (
+          <NetworkAuditView
+            onOpenKaliTerminal={handleOpenTerminalWithCommand}
+            onToast={showToast}
           />
         )}
 

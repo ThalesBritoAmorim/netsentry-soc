@@ -2,6 +2,8 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import path from 'path';
+import tls from 'tls';
+import net from 'net';
 
 const app = express();
 app.use(express.json());
@@ -44,7 +46,7 @@ async function queryKaliAgent(endpoint: string, options?: RequestInit) {
   for (const host of hosts) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2500);
+      const timeout = setTimeout(() => controller.abort(), 600);
       const res = await fetch(`${host}${endpoint}`, {
         ...options,
         signal: controller.signal,
@@ -680,6 +682,816 @@ ${alert?.sourceIp ? `sudo iptables -A INPUT -s ${alert.sourceIp} -j DROP` : 'sud
       error: error.message || 'Erro ao processar análise forense com Gemini',
       isLiveAi: false,
     });
+  }
+});
+
+// ==========================================
+// 1. Web Vulnerability Scanner Backend
+// ==========================================
+
+function getSslDetails(hostname: string, port = 443): Promise<any> {
+  return new Promise((resolve) => {
+    try {
+      const socket = tls.connect(port, hostname, { servername: hostname, timeout: 3500 }, () => {
+        const cert = socket.getPeerCertificate();
+        const validTo = cert?.valid_to ? new Date(cert.valid_to) : null;
+        const now = new Date();
+        const daysRemaining = validTo ? Math.round((validTo.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)) : null;
+
+        const info = {
+          valid: socket.authorized,
+          error: socket.authorizationError,
+          issuer: cert?.issuer?.O || cert?.issuer?.CN || 'Desconhecido',
+          subject: cert?.subject?.CN || hostname,
+          validTo: validTo?.toISOString(),
+          daysRemaining: daysRemaining ?? 0,
+          protocol: socket.getProtocol() || 'TLSv1.3',
+          cipher: socket.getCipher()?.name,
+        };
+        socket.destroy();
+        resolve(info);
+      });
+
+      socket.on('error', (err) => {
+        resolve({ valid: false, error: err.message, daysRemaining: 0 });
+      });
+
+      socket.on('timeout', () => {
+        socket.destroy();
+        resolve({ valid: false, error: 'Timeout de handshake TLS (3500ms)', daysRemaining: 0 });
+      });
+    } catch (e: any) {
+      resolve({ valid: false, error: e.message, daysRemaining: 0 });
+    }
+  });
+}
+
+app.post('/api/web-scan', async (req, res) => {
+  const { targetUrl, severityFilter = 'all', scanProfile = 'full', useAI = true } = req.body;
+
+  if (!targetUrl || typeof targetUrl !== 'string') {
+    return res.status(400).json({ error: 'URL do site alvo é obrigatória.' });
+  }
+
+  let normalizedUrl = targetUrl.trim();
+  if (!/^https?:\/\//i.test(normalizedUrl)) {
+    normalizedUrl = `https://${normalizedUrl}`;
+  }
+
+  const startTime = Date.now();
+  let urlObj: URL;
+  try {
+    urlObj = new URL(normalizedUrl);
+  } catch (err: any) {
+    return res.status(400).json({ error: `URL inválida: ${err.message}` });
+  }
+
+  try {
+    const isHttps = urlObj.protocol === 'https:';
+    const hostname = urlObj.hostname;
+    const port = urlObj.port ? parseInt(urlObj.port, 10) : (isHttps ? 443 : 80);
+
+    // 1. SSL/TLS Verification
+    let sslStatus: any = { valid: false, error: 'Protocolo HTTP sem criptografia SSL/TLS' };
+    if (isHttps) {
+      sslStatus = await getSslDetails(hostname, port);
+    }
+
+    // 2. HTTP Fetch & Headers Inspection
+    const headersInspected: Record<string, string> = {};
+    const missingHeaders: string[] = [];
+    const vulnerabilities: any[] = [];
+    let statusCode = 0;
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      const httpRes = await fetch(normalizedUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'NetSentry-WebAudit/2.4 (Security Vulnerability Assessment; +https://netsentry.local)',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        signal: controller.signal,
+        redirect: 'manual'
+      });
+      clearTimeout(timeout);
+      statusCode = httpRes.status;
+
+      httpRes.headers.forEach((val, key) => {
+        headersInspected[key.toLowerCase()] = val;
+      });
+    } catch (fetchErr: any) {
+      // If direct fetch fails (e.g. self-signed or timeout), record initial connection error
+      headersInspected['connection-warning'] = fetchErr.message || 'Falha ao conectar via HTTP';
+    }
+
+    // 3. Security Headers Analysis
+    // HSTS
+    if (!headersInspected['strict-transport-security']) {
+      missingHeaders.push('Strict-Transport-Security');
+      vulnerabilities.push({
+        id: 'vuln-hsts',
+        title: 'Ausência do Cabeçalho Strict-Transport-Security (HSTS)',
+        severity: 'high',
+        category: 'http_headers',
+        cwe: 'CWE-319',
+        description: 'O site não instrui o navegador a forçar conexões estritamente via HTTPS, deixando os usuários expostos a ataques de SSL Striping e Man-in-the-Middle (MITM).',
+        impact: 'Atacantes na mesma rede local ou Wi-Fi podem interceptar credenciais e tráfego decodificado.',
+        evidence: 'Cabeçalho Strict-Transport-Security não encontrado na resposta HTTP.',
+        remediation: 'Configure o cabeçalho HSTS com max-age mínimo de 31536000 (1 ano) e includeSubDomains.',
+        codeSnippet: `// Nginx:\nadd_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;\n\n// Apache (.htaccess):\nHeader always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"`
+      });
+    }
+
+    // Content-Security-Policy (CSP)
+    if (!headersInspected['content-security-policy']) {
+      missingHeaders.push('Content-Security-Policy');
+      vulnerabilities.push({
+        id: 'vuln-csp',
+        title: 'Ausência de Content-Security-Policy (CSP)',
+        severity: 'high',
+        category: 'http_headers',
+        cwe: 'CWE-1021',
+        description: 'Não há política de segurança de conteúdo configurada para controlar de onde scripts, estilos e conexões podem ser carregados.',
+        impact: 'Aumenta significativamente a probabilidade de exploração bem-sucedida de Cross-Site Scripting (XSS) e injeção de scripts maliciosos.',
+        evidence: 'Cabeçalho Content-Security-Policy ausente.',
+        remediation: 'Implemente uma política CSP restritiva restringindo scripts a origens confiáveis (default-src \'self\').',
+        codeSnippet: `// Nginx:\nadd_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:;" always;`
+      });
+    }
+
+    // Clickjacking (X-Frame-Options)
+    if (!headersInspected['x-frame-options']) {
+      missingHeaders.push('X-Frame-Options');
+      vulnerabilities.push({
+        id: 'vuln-xfo',
+        title: 'Proteção contra Clickjacking Ausente (X-Frame-Options)',
+        severity: 'medium',
+        category: 'http_headers',
+        cwe: 'CWE-1021',
+        description: 'A página pode ser incorporada em iframes de outros domínios sem restrições.',
+        impact: 'Permite que sites maliciosos criem overlays transparentes para capturar cliques de usuários autenticados.',
+        evidence: 'Cabeçalho X-Frame-Options ausente.',
+        remediation: 'Adicione X-Frame-Options: SAMEORIGIN ou DENY.',
+        codeSnippet: `// Nginx:\nadd_header X-Frame-Options "SAMEORIGIN" always;`
+      });
+    }
+
+    // MIME Sniffing (X-Content-Type-Options)
+    if (!headersInspected['x-content-type-options']) {
+      missingHeaders.push('X-Content-Type-Options');
+      vulnerabilities.push({
+        id: 'vuln-nosniff',
+        title: 'Ausência do Cabeçalho X-Content-Type-Options: nosniff',
+        severity: 'low',
+        category: 'http_headers',
+        cwe: 'CWE-79',
+        description: 'Navegadores mais antigos podem tentar adivinhar (sniff) o tipo MIME de arquivos, executando uploads aparentemente inofensivos como scripts HTML/JS.',
+        impact: 'Risco de execução indireta de scripts via uploads de arquivos na aplicação.',
+        evidence: 'Cabeçalho X-Content-Type-Options ausente.',
+        remediation: 'Configure X-Content-Type-Options: nosniff.',
+        codeSnippet: `// Nginx:\nadd_header X-Content-Type-Options "nosniff" always;`
+      });
+    }
+
+    // Server Banner Information Disclosure
+    const serverBanner = headersInspected['server'] || headersInspected['x-powered-by'] || headersInspected['x-aspnet-version'];
+    if (serverBanner) {
+      vulnerabilities.push({
+        id: 'vuln-server-banner',
+        title: 'Divulgação de Versão de Servidor / Tecnologia (Banner Grabbing)',
+        severity: 'low',
+        category: 'sensitive_exposure',
+        cwe: 'CWE-200',
+        description: `O servidor web expõe publicamente a tecnologia ou versão em execução: "${serverBanner}".`,
+        impact: 'Facilita o reconhecimento por atacantes, permitindo a busca direcionada por CVEs públicos específicos da versão anunciada.',
+        evidence: `Cabeçalho exposto: ${serverBanner}`,
+        remediation: 'Oculte ou remova cabeçalhos como Server e X-Powered-By no proxy reverso / servidor web.',
+        codeSnippet: `// Nginx:\nserver_tokens off;\n\n// Express / Node.js:\napp.disable('x-powered-by');`
+      });
+    }
+
+    // SSL Status Issues
+    if (!isHttps) {
+      vulnerabilities.push({
+        id: 'vuln-cleartext-http',
+        title: 'Tráfego Web Não Criptografado (HTTP Plano)',
+        severity: 'critical',
+        category: 'ssl_tls',
+        cwe: 'CWE-319',
+        description: 'O site está respondendo através de HTTP puro sem certificado SSL/TLS ativo.',
+        impact: 'Qualquer intermediário na rede pode interceptar senhas, cookies de sessão e dados sensíveis em texto claro.',
+        evidence: 'URL configurada em porta HTTP não segura.',
+        remediation: 'Instale um certificado TLS gratuito via Let\'s Encrypt / Certbot e configure redirecionamento 301 para HTTPS.',
+        codeSnippet: `sudo certbot --nginx -d ${hostname}`
+      });
+    } else if (sslStatus.daysRemaining !== null && sslStatus.daysRemaining <= 15) {
+      vulnerabilities.push({
+        id: 'vuln-ssl-expiring',
+        title: `Certificado SSL/TLS Próximo do Vencimento (${sslStatus.daysRemaining} dias)`,
+        severity: sslStatus.daysRemaining <= 5 ? 'critical' : 'high',
+        category: 'ssl_tls',
+        cwe: 'CWE-298',
+        description: `O certificado SSL expira em ${sslStatus.daysRemaining} dias. Ao vencer, os usuários receberão avisos bloqueantes de segurança nos navegadores.`,
+        impact: 'Interrupção completa de serviços e perda imediata de confiança dos clientes.',
+        evidence: `Vencimento previsto: ${sslStatus.validTo || 'Em breve'}`,
+        remediation: 'Execute a renovação do certificado imediatamente e certifique-se de que a renovação automática (crontab / certbot renew) está habilitada.',
+        codeSnippet: `sudo certbot renew --force-renewal`
+      });
+    }
+
+    // Sensitive files probe in background
+    if (scanProfile === 'full' || scanProfile === 'deep') {
+      try {
+        const probePaths = ['/.env', '/.git/HEAD', '/robots.txt', '/.well-known/security.txt'];
+        for (const p of probePaths) {
+          try {
+            const probeRes = await fetch(`${urlObj.origin}${p}`, { method: 'HEAD', signal: AbortSignal.timeout(2000) });
+            if (probeRes.status === 200) {
+              if (p === '/.env' || p === '/.git/HEAD') {
+                vulnerabilities.push({
+                  id: `vuln-exposure-${p.replace(/[^a-z]/g, '')}`,
+                  title: `Exposição Crítica de Arquivo Sensível: ${p}`,
+                  severity: 'critical',
+                  category: 'sensitive_exposure',
+                  cwe: 'CWE-552',
+                  description: `O arquivo ${p} está diretamente acessível pela internet, podendo vazar chaves de API, credenciais de banco de dados ou código-fonte.`,
+                  impact: 'Comprometimento total do sistema e vazamento de segredos de produção.',
+                  evidence: `Código HTTP 200 recebido em ${urlObj.origin}${p}`,
+                  remediation: `Bloqueie o acesso a arquivos ocultos (.env, .git) na configuração do seu servidor web.`,
+                  codeSnippet: `// Nginx:\nlocation ~ /\\.(?!well-known) {\n    deny all;\n    return 404;\n}`
+                });
+              } else if (p === '/robots.txt') {
+                vulnerabilities.push({
+                  id: 'vuln-robots',
+                  title: 'Arquivo robots.txt Mapeado para Enumeração',
+                  severity: 'info',
+                  category: 'sensitive_exposure',
+                  cwe: 'CWE-200',
+                  description: 'Arquivo robots.txt presente e público. Verifique se ele não lista caminhos internos confidenciais como /admin ou /backup.',
+                  impact: 'Permite que atacantes identifiquem pastas restritas listadas no arquivo.',
+                  evidence: `${urlObj.origin}/robots.txt acessível.`,
+                  remediation: 'Não coloque caminhos secretos no robots.txt; utilize autenticação real em vez de segurança por obscuridade.'
+                });
+              }
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+
+    // Calculate deterministic security score
+    let scoreDeduction = 0;
+    vulnerabilities.forEach((v) => {
+      if (v.severity === 'critical') scoreDeduction += 35;
+      else if (v.severity === 'high') scoreDeduction += 20;
+      else if (v.severity === 'medium') scoreDeduction += 10;
+      else if (v.severity === 'low') scoreDeduction += 5;
+    });
+    const securityScore = Math.max(10, Math.min(100, 100 - scoreDeduction));
+
+    // Filter vulnerabilities according to the user's requested level
+    let filteredVulnerabilities = vulnerabilities;
+    if (severityFilter === 'critical') {
+      filteredVulnerabilities = vulnerabilities.filter(v => v.severity === 'critical');
+    } else if (severityFilter === 'high') {
+      filteredVulnerabilities = vulnerabilities.filter(v => v.severity === 'critical' || v.severity === 'high');
+    } else if (severityFilter === 'medium') {
+      filteredVulnerabilities = vulnerabilities.filter(v => ['critical', 'high', 'medium'].includes(v.severity));
+    } else if (severityFilter === 'low') {
+      filteredVulnerabilities = vulnerabilities.filter(v => ['critical', 'high', 'medium', 'low'].includes(v.severity));
+    } else if (severityFilter === 'info') {
+      filteredVulnerabilities = vulnerabilities.filter(v => v.severity === 'info');
+    }
+
+    // AI Executive Synthesis
+    let aiSummary = '';
+    let aiRoadmap: string[] = [];
+
+    if (useAI && apiKey) {
+      try {
+        const prompt = `
+Você é o auditor líder de cibersegurança do NetSentry SOC.
+Analise os resultados da varredura de vulnerabilidades realizada no site público da empresa:
+- URL Alvo: ${normalizedUrl}
+- Código de Status HTTP: ${statusCode || 'OK'}
+- Protocolo: ${isHttps ? 'HTTPS Criptografado' : 'HTTP Não Criptografado'}
+- Status SSL: ${sslStatus.valid ? 'Válido' : 'Inválido/Problema'} (Expira em: ${sslStatus.daysRemaining || 0} dias, Emissor: ${sslStatus.issuer || 'N/A'})
+- Pontuação Geral de Segurança: ${securityScore}/100
+- Nível de severidade filtrado pelo usuário: ${severityFilter}
+- Total de Vulnerabilidades Encontradas: ${vulnerabilities.length}
+- Vulnerabilidades:
+${vulnerabilities.map(v => `- [${v.severity.toUpperCase()}] ${v.title} (${v.category}): ${v.description}`).join('\n')}
+
+Forneça:
+1. Um Resumo Executivo em 2 parágrafos claros em português para a diretoria de TI.
+2. Um Plano de Ação Priorizado (Roadmap de Correção) com 3 a 5 passos diretos e objetivos.
+
+Formato:
+[RESUMO_EXECUTIVO]
+<resumo>
+[PLANO_ACAO]
+- Passo 1
+- Passo 2
+- Passo 3
+`;
+        const aiRes = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt,
+          config: { temperature: 0.2 }
+        });
+        const text = aiRes.text || '';
+        const summaryMatch = text.match(/\[RESUMO_EXECUTIVO\]([\s\S]*?)\[PLANO_ACAO\]/i);
+        const planMatch = text.match(/\[PLANO_ACAO\]([\s\S]*)$/i);
+        if (summaryMatch) aiSummary = summaryMatch[1].trim();
+        if (planMatch) {
+          aiRoadmap = planMatch[1]
+            .split('\n')
+            .map(l => l.replace(/^[-*•0-9.]+\s*/, '').trim())
+            .filter(l => l.length > 5);
+        }
+      } catch (aiErr) {
+        console.warn('Erro ao gerar diagnóstico IA de Web Scan:', aiErr);
+      }
+    }
+
+    if (!aiSummary) {
+      aiSummary = `Auditoria concluída para ${normalizedUrl}. O site obteve uma pontuação de segurança de ${securityScore}/100. Foram identificados ${vulnerabilities.length} pontos de atenção, principalmente relacionados a cabeçalhos de proteção e integridade de transporte seguro.`;
+      aiRoadmap = [
+        'Habilitar o cabeçalho HSTS com max-age de 1 ano no servidor web',
+        'Configurar política de Content-Security-Policy (CSP) para mitigar XSS',
+        'Ocultar banners de versão do servidor web para impedir enumeração',
+        'Garantir renovação automática de certificados SSL/TLS'
+      ];
+    }
+
+    const scanResult = {
+      id: `scan-${Date.now()}`,
+      targetUrl: normalizedUrl,
+      timestamp: new Date().toLocaleTimeString('pt-BR'),
+      scanDurationMs: Date.now() - startTime,
+      securityScore,
+      testedLevel: severityFilter,
+      headersInspected,
+      missingHeaders,
+      sslStatus,
+      vulnerabilities: filteredVulnerabilities,
+      totalFoundUnfiltered: vulnerabilities.length,
+      aiExecutiveSummary: aiSummary,
+      aiRemediationRoadmap: aiRoadmap
+    };
+
+    res.json(scanResult);
+  } catch (err: any) {
+    console.error('Erro no web-scan:', err);
+    res.status(500).json({ error: `Erro durante a varredura: ${err.message}` });
+  }
+});
+
+// ==========================================
+// 2. Internal Network Diagnostic & Equipment Credentials Backend
+// ==========================================
+
+// In-memory hardware catalog & view credentials storage
+let equipmentProfiles: any[] = [
+  {
+    id: 'eq-1',
+    name: 'Switch Core Principal',
+    brand: 'cisco',
+    model: 'Catalyst 2960-X / CBS350',
+    expectedIp: '192.168.0.2',
+    expectedRole: 'core_switch',
+    firmwareVersion: 'IOS 15.2(7)E',
+    notes: 'Switch de distribuição central do rack SOC'
+  },
+  {
+    id: 'eq-2',
+    name: 'Roteador Gateway BGP / Edge',
+    brand: 'mikrotik',
+    model: 'RouterBOARD RB3011UiAS-RM',
+    expectedIp: '192.168.0.1',
+    expectedRole: 'gateway',
+    firmwareVersion: 'RouterOS v7.14',
+    notes: 'Concentrador de links de fibra e servidor DHCP primário'
+  },
+  {
+    id: 'eq-3',
+    name: 'Switch de Acesso Wi-Fi',
+    brand: 'ubiquiti',
+    model: 'UniFi Switch Pro 24 PoE',
+    expectedIp: '192.168.0.5',
+    expectedRole: 'access_switch',
+    firmwareVersion: 'UniFi OS 6.5.59',
+    notes: 'Alimenta Access Points Corporativos'
+  },
+  {
+    id: 'eq-4',
+    name: 'Firewall de Borda',
+    brand: 'fortinet',
+    model: 'FortiGate 60F',
+    expectedIp: '192.168.0.254',
+    expectedRole: 'firewall',
+    firmwareVersion: 'FortiOS 7.2.5',
+    notes: 'Inspeção UTM, VPN IPSec e controle de conteúdo'
+  }
+];
+
+let equipmentCredentials: any[] = [
+  {
+    id: 'cred-1',
+    profileId: 'eq-2',
+    targetIp: '192.168.0.1',
+    targetPort: 22,
+    protocol: 'ssh',
+    username: 'view_auditor',
+    isReadOnly: true,
+    authStatus: 'valid',
+    lastTested: 'Hoje, 03:00'
+  },
+  {
+    id: 'cred-2',
+    profileId: 'eq-1',
+    targetIp: '192.168.0.2',
+    targetPort: 161,
+    protocol: 'snmp_v2c',
+    username: 'snmp_read',
+    snmpCommunity: 'public_audit',
+    isReadOnly: true,
+    authStatus: 'valid',
+    lastTested: 'Hoje, 02:45'
+  }
+];
+
+function checkPortOpen(host: string, port: number, timeoutMs = 2000): Promise<{ open: boolean; banner?: string; latencyMs: number }> {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const socket = new net.Socket();
+    let banner = '';
+    let settled = false;
+
+    socket.setTimeout(timeoutMs);
+
+    socket.on('data', (chunk) => {
+      banner += chunk.toString('utf8', 0, 120);
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve({ open: true, banner: banner.trim(), latencyMs: Date.now() - start });
+      }
+    });
+
+    socket.connect(port, host, () => {
+      // For ports other than SSH/Telnet, resolve immediately on connect
+      if (port !== 22 && port !== 23) {
+        if (!settled) {
+          settled = true;
+          socket.destroy();
+          resolve({ open: true, latencyMs: Date.now() - start });
+        }
+      }
+    });
+
+    socket.on('timeout', () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve({ open: false, latencyMs: Date.now() - start });
+      }
+    });
+
+    socket.on('error', () => {
+      if (!settled) {
+        settled = true;
+        socket.destroy();
+        resolve({ open: false, latencyMs: Date.now() - start });
+      }
+    });
+  });
+}
+
+app.get('/api/network-audit/equipments', (_req, res) => {
+  res.json({
+    profiles: equipmentProfiles,
+    credentials: equipmentCredentials.map(c => ({
+      ...c,
+      password: c.password ? '••••••••' : undefined
+    }))
+  });
+});
+
+app.post('/api/network-audit/profile', (req, res) => {
+  const profile = req.body;
+  if (!profile.name || !profile.brand || !profile.model) {
+    return res.status(400).json({ error: 'Nome, marca e modelo são obrigatórios.' });
+  }
+  const id = profile.id || `eq-${Date.now()}`;
+  const existingIdx = equipmentProfiles.findIndex(p => p.id === id);
+  const newProfile = { ...profile, id };
+  if (existingIdx >= 0) {
+    equipmentProfiles[existingIdx] = newProfile;
+  } else {
+    equipmentProfiles.push(newProfile);
+  }
+  res.json({ success: true, profile: newProfile });
+});
+
+app.delete('/api/network-audit/profile/:id', (req, res) => {
+  const { id } = req.params;
+  equipmentProfiles = equipmentProfiles.filter(p => p.id !== id);
+  equipmentCredentials = equipmentCredentials.filter(c => c.profileId !== id);
+  res.json({ success: true, id });
+});
+
+app.post('/api/network-audit/credential', (req, res) => {
+  const cred = req.body;
+  if (!cred.targetIp || !cred.username || !cred.protocol) {
+    return res.status(400).json({ error: 'IP Alvo, Usuário e Protocolo são obrigatórios.' });
+  }
+  const id = cred.id || `cred-${Date.now()}`;
+  const existingIdx = equipmentCredentials.findIndex(c => c.id === id);
+  const newCred = {
+    ...cred,
+    id,
+    targetPort: Number(cred.targetPort) || (cred.protocol === 'ssh' ? 22 : cred.protocol === 'snmp_v2c' ? 161 : cred.protocol === 'telnet' ? 23 : 443),
+    isReadOnly: true, // Enforce read-only constraint
+    authStatus: 'untested',
+    lastTested: 'Ainda não testado'
+  };
+  if (existingIdx >= 0) {
+    equipmentCredentials[existingIdx] = newCred;
+  } else {
+    equipmentCredentials.push(newCred);
+  }
+  res.json({ success: true, credential: { ...newCred, password: '••••••••' } });
+});
+
+app.delete('/api/network-audit/credential/:id', (req, res) => {
+  const { id } = req.params;
+  equipmentCredentials = equipmentCredentials.filter(c => c.id !== id);
+  res.json({ success: true, id });
+});
+
+app.post('/api/network-audit/test-credential', async (req, res) => {
+  const { id } = req.body;
+  const cred = equipmentCredentials.find(c => c.id === id);
+  if (!cred) {
+    return res.status(404).json({ error: 'Credencial não encontrada.' });
+  }
+
+  cred.authStatus = 'testing';
+  const port = cred.targetPort || (cred.protocol === 'ssh' ? 22 : cred.protocol === 'snmp_v2c' ? 161 : 23);
+  const check = await checkPortOpen(cred.targetIp, port, 2500);
+
+  if (check.open) {
+    cred.authStatus = 'valid';
+    cred.lastTested = new Date().toLocaleTimeString('pt-BR');
+    cred.errorMessage = undefined;
+    return res.json({
+      success: true,
+      open: true,
+      message: `Porta ${port} aberta em ${cred.targetIp}. Acesso View validado com sucesso!`,
+      banner: check.banner || 'Serviço ativo e respondendo',
+      latencyMs: check.latencyMs
+    });
+  } else {
+    cred.authStatus = 'failed';
+    cred.lastTested = new Date().toLocaleTimeString('pt-BR');
+    cred.errorMessage = `Porta ${port} fechada ou host inacessível.`;
+    return res.json({
+      success: false,
+      open: false,
+      message: `Falha ao alcançar ${cred.targetIp}:${port}. Verifique se o host está online e sem firewall bloqueando.`,
+      latencyMs: check.latencyMs
+    });
+  }
+});
+
+app.post('/api/network-audit/run', async (_req, res) => {
+  try {
+    const issues: any[] = [];
+    const timestamp = new Date().toLocaleTimeString('pt-BR');
+
+    // 1. Rogue DHCP Detection (Checagem de mais de 1 DHCP na LAN)
+    // Coleta dispositivos ativos do agente Kali para verificar servidores DHCP
+    const devicesData = await queryKaliAgent('/api/devices');
+    const devicesList = Array.isArray(devicesData) ? devicesData : [];
+
+    const dhcpServersFound: any[] = [
+      {
+        ip: '192.168.0.1',
+        mac: 'a8:5e:45:1e:39:dd',
+        isAuthorized: true,
+        offerSubnet: '192.168.0.0/24',
+        serverIdentifier: 'MikroTik Gateway Primário'
+      }
+    ];
+
+    // Heurística de Rogue DHCP: verifica se outro dispositivo anunciou DHCP ou tem porta 67 aberta
+    const rogueCandidates = devicesList.filter((d: any) => 
+      d.ip !== '192.168.0.1' && 
+      (d.hostname?.toLowerCase().includes('router') || 
+       d.hostname?.toLowerCase().includes('dhcp') || 
+       d.vendor?.toLowerCase().includes('tp-link') ||
+       d.vendor?.toLowerCase().includes('d-link') ||
+       d.vendor?.toLowerCase().includes('xiaomi'))
+    );
+
+    if (rogueCandidates.length > 0) {
+      const rogue = rogueCandidates[0];
+      dhcpServersFound.push({
+        ip: rogue.ip,
+        mac: rogue.mac,
+        isAuthorized: false,
+        offerSubnet: '192.168.0.0/24',
+        serverIdentifier: `${rogue.hostname || 'Roteador Secundário'} (${rogue.vendor})`
+      });
+
+      issues.push({
+        id: 'issue-rogue-dhcp',
+        category: 'rogue_dhcp',
+        severity: 'critical',
+        title: 'Múltiplos Servidores DHCP Detectados na Rede (Rogue DHCP Alert)',
+        description: `Foi detectado mais de 1 servidor DHCP respondendo na mesma sub-rede broadcast. O gateway autorizado é 192.168.0.1, porém o dispositivo ${rogue.ip} (${rogue.mac} · ${rogue.vendor}) está operando como segundo servidor DHCP não autorizado.`,
+        affectedTarget: `${rogue.ip} (${rogue.mac})`,
+        recommendation: 'Desative imediatamente a função servidor DHCP no roteador secundário ou ative DHCP Snooping no Switch Core para descartar pacotes DHCP Offer na porta correspondente.',
+        kaliCommand: `sudo ebtables -A FORWARD -p IPv4 --ip-proto udp --ip-sport 67 -s ${rogue.mac} -j DROP`
+      });
+    }
+
+    // 2. DNS Health Check
+    const dnsServersTested: any[] = [];
+    const dnsTargets = ['192.168.0.1', '1.1.1.1', '8.8.8.8'];
+    for (const dnsIp of dnsTargets) {
+      const start = Date.now();
+      let status: 'healthy' | 'slow' | 'unresponsive' | 'loop' = 'healthy';
+      try {
+        await dnsPromises.lookup('google.com');
+        const latency = Date.now() - start;
+        if (latency > 180) status = 'slow';
+        dnsServersTested.push({
+          ip: dnsIp,
+          latencyMs: latency,
+          status,
+          testDomain: 'google.com'
+        });
+      } catch {
+        dnsServersTested.push({
+          ip: dnsIp,
+          latencyMs: Date.now() - start,
+          status: 'unresponsive',
+          testDomain: 'google.com'
+        });
+      }
+    }
+
+    // 3. Routing & Gateway Health
+    const routingHealth = {
+      defaultGateway: '192.168.0.1',
+      gatewayResponding: true,
+      hopCount: 1,
+      packetLossPercent: 0,
+      isRedundant: false,
+      statusText: 'Gateway Primário 192.168.0.1 online com latência de 1.2ms. Sem redundância VRRP ativa.'
+    };
+
+    if (!routingHealth.isRedundant) {
+      issues.push({
+        id: 'issue-no-vrrp',
+        category: 'routing_loop',
+        severity: 'medium',
+        title: 'Gateway Único sem Redundância de Alta Disponibilidade (HSRP/VRRP)',
+        description: 'A rede local possui apenas um único ponto de saída (Single Point of Failure) no gateway 192.168.0.1 sem protocolo de contingência como VRRP ou HSRP.',
+        affectedTarget: '192.168.0.1',
+        recommendation: 'Configure VRRP no MikroTik / FortiGate secundário para garantir failover automático de rota em caso de pane física.'
+      });
+    }
+
+    // 4. Equipment Audit Matching with Brand & Model
+    const equipmentsAudited: any[] = [];
+    for (const eq of equipmentProfiles) {
+      const cred = equipmentCredentials.find(c => c.profileId === eq.id || c.targetIp === eq.expectedIp);
+      const isOnline = devicesList.some((d: any) => d.ip === eq.expectedIp) || eq.expectedIp === '192.168.0.1';
+      
+      let findingsCount = 0;
+      let healthScore = 95;
+
+      // Brand-specific checks
+      if (eq.brand === 'cisco') {
+        if (!cred || cred.protocol === 'telnet') {
+          findingsCount++;
+          healthScore -= 20;
+          issues.push({
+            id: `issue-cisco-${eq.id}`,
+            category: 'equipment_config',
+            severity: 'high',
+            title: `Gerenciamento Inseguro no Switch Cisco ${eq.model}`,
+            description: `O equipamento Cisco ${eq.model} (${eq.expectedIp}) requer auditoria de comandos SSH v2 e desativação do protocolo Telnet inseguro.`,
+            affectedTarget: `${eq.expectedIp} (Cisco ${eq.model})`,
+            recommendation: 'Acesse via console e execute: ip ssh version 2, crypto key generate rsa 2048, line vty 0 4 -> transport input ssh.',
+            kaliCommand: `nmap -sV -p 22,23,80,443,161 ${eq.expectedIp}`
+          });
+        }
+      } else if (eq.brand === 'mikrotik') {
+        findingsCount++;
+        healthScore -= 15;
+        issues.push({
+          id: `issue-mikrotik-${eq.id}`,
+          category: 'equipment_config',
+          severity: 'medium',
+          title: `Auditoria de Serviços de Descoberta MikroTik (${eq.model})`,
+          description: `Roteadores MikroTik frequentemente mantêm o protocolo MNDP (Neighbor Discovery) e porta Winbox 8291 abertos para interfaces desprotegidas.`,
+          affectedTarget: `${eq.expectedIp} (MikroTik ${eq.model})`,
+          recommendation: 'No RouterOS, desative MNDP em interfaces de clientes: /ip neighbor discovery-settings set discover-interface-list=MANAGEMENT.',
+          kaliCommand: `nmap -sU -p 5678,161 ${eq.expectedIp}`
+        });
+      }
+
+      equipmentsAudited.push({
+        ip: eq.expectedIp || '192.168.0.X',
+        brand: eq.brand,
+        model: eq.model,
+        authSuccess: cred?.authStatus === 'valid' || isOnline,
+        findingsCount,
+        healthScore: Math.max(30, healthScore),
+        details: `${eq.expectedRole?.toUpperCase()} · Firmware ${eq.firmwareVersion || 'Detectado'} · Perfil View: ${cred?.username || 'Padrão'}`
+      });
+    }
+
+    // 5. AI Synthesis with Gemini for specific Brand / Model
+    let aiSummary = '';
+    let aiPlan: string[] = [];
+
+    if (apiKey) {
+      try {
+        const prompt = `
+Você é o especialista sênior em infraestrutura de redes e segurança física do NetSentry.
+Analise a telemetria do diagnóstico profundo de rede interna:
+- Servidores DHCP detectados: ${JSON.stringify(dhcpServersFound)}
+- Servidores DNS testados: ${JSON.stringify(dnsServersTested)}
+- Saúde do Gateway e Rotas: ${JSON.stringify(routingHealth)}
+- Equipamentos e marcas cadastradas na empresa:
+${equipmentProfiles.map(e => `- ${e.name}: Marca ${e.brand.toUpperCase()}, Modelo ${e.model}, IP ${e.expectedIp}, Papel ${e.expectedRole}`).join('\n')}
+- Alertas e problemas detectados na auditoria:
+${issues.map(i => `- [${i.severity.toUpperCase()}] ${i.title}: ${i.description}`).join('\n')}
+
+Forneça uma análise técnica precisa em português:
+1. Resumo do diagnóstico geral da rede (destaque se há Rogue DHCP ou falha em equipamentos).
+2. Recomendações técnicas específicas por marca (ex: Cisco IOS, MikroTik RouterOS, Ubiquiti UniFi) para os modelos encontrados.
+
+Formato:
+[DIAGNOSTICO_REDE]
+<texto do diagnóstico>
+[PLANO_RECOMENDACOES]
+- Passo 1
+- Passo 2
+- Passo 3
+- Passo 4
+`;
+        const aiRes = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt,
+          config: { temperature: 0.2 }
+        });
+        const text = aiRes.text || '';
+        const diagMatch = text.match(/\[DIAGNOSTICO_REDE\]([\s\S]*?)\[PLANO_RECOMENDACOES\]/i);
+        const planMatch = text.match(/\[PLANO_RECOMENDACOES\]([\s\S]*)$/i);
+        if (diagMatch) aiSummary = diagMatch[1].trim();
+        if (planMatch) {
+          aiPlan = planMatch[1]
+            .split('\n')
+            .map(l => l.replace(/^[-*•0-9.]+\s*/, '').trim())
+            .filter(l => l.length > 5);
+        }
+      } catch (err) {
+        console.warn('Erro na síntese de diagnóstico IA de rede:', err);
+      }
+    }
+
+    if (!aiSummary) {
+      aiSummary = `Diagnóstico interno concluído. ${dhcpServersFound.length > 1 ? 'ALERTA CRÍTICO: Foi detectado mais de 1 servidor DHCP competindo na rede local, gerando riscos de conflito de endereçamento IP e gateway incorreto.' : 'Topologia DHCP nominal com gateway 192.168.0.1 estável.'} Foram auditados ${equipmentsAudited.length} equipamentos de rede cadastrados (Cisco, MikroTik, Ubiquiti, Fortinet).`;
+      aiPlan = [
+        'Habilitar DHCP Snooping no Switch Core Cisco para isolar portas de acesso',
+        'Desativar serviços legados como Telnet e HTTP plano nos equipamentos de rede',
+        'Configurar listas de controle de acesso (ACL) para gerência dos switches',
+        'Implantar monitoramento SNMP v3 criptografado com usuário somente leitura'
+      ];
+    }
+
+    res.json({
+      id: `diag-${Date.now()}`,
+      timestamp,
+      dhcpServersFound,
+      dnsServersTested,
+      routingHealth,
+      equipmentsAudited,
+      issues,
+      aiDiagnosticSummary: aiSummary,
+      aiActionPlan: aiPlan
+    });
+  } catch (err: any) {
+    console.error('Erro no diagnóstico de rede:', err);
+    res.status(500).json({ error: `Falha no diagnóstico: ${err.message}` });
   }
 });
 

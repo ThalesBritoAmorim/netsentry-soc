@@ -6,7 +6,12 @@ import {
   DatabaseBackup, 
   AuditLogEntry, 
   SystemMetrics,
-  ThreatCategory
+  ThreatCategory,
+  WebScanResult,
+  WebSeverityFilter,
+  EquipmentProfile,
+  EquipmentCredential,
+  NetworkDiagnosticResult
 } from '../types';
 import { 
   INITIAL_DEVICES, 
@@ -905,6 +910,106 @@ class NetworkEngine {
       ipAddress: '192.168.1.50'
     };
     this.state.auditLogs = [entry, ...this.state.auditLogs.slice(0, 99)];
+  }
+
+  // ==========================================
+  // Web Scanner API Client
+  // ==========================================
+  public async runWebScan(targetUrl: string, severityFilter: WebSeverityFilter = 'all', scanProfile: string = 'full', useAI: boolean = true): Promise<WebScanResult> {
+    const res = await fetch('/api/web-scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetUrl, severityFilter, scanProfile, useAI })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Erro HTTP ${res.status} ao executar varredura web.`);
+    }
+    const result: WebScanResult = await res.json();
+    this.addAuditLog(
+      'Auditor Web NetSentry',
+      `Varredura de Vulnerabilidades Web (${severityFilter.toUpperCase()})`,
+      targetUrl,
+      result.securityScore >= 70 ? 'success' : 'warning'
+    );
+    return result;
+  }
+
+  // ==========================================
+  // Network Audit & Equipment Diagnostic API Client
+  // ==========================================
+  public async runNetworkAudit(): Promise<NetworkDiagnosticResult> {
+    const res = await fetch('/api/network-audit/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Erro HTTP ${res.status} ao executar diagnóstico de rede.`);
+    }
+    const result: NetworkDiagnosticResult = await res.json();
+    this.addAuditLog(
+      'Diagnóstico Profundo SOC',
+      `Auditoria de Rede Interna, DHCP e Equipamentos`,
+      'Topologia LAN',
+      result.dhcpServersFound.length > 1 ? 'warning' : 'success'
+    );
+    return result;
+  }
+
+  public async getEquipmentsData(): Promise<{ profiles: EquipmentProfile[]; credentials: EquipmentCredential[] }> {
+    const res = await fetch('/api/network-audit/equipments');
+    if (!res.ok) {
+      throw new Error('Falha ao carregar catálogo de equipamentos.');
+    }
+    return res.json();
+  }
+
+  public async saveEquipmentProfile(profile: EquipmentProfile): Promise<void> {
+    const res = await fetch('/api/network-audit/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(profile)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar perfil de equipamento.');
+    }
+  }
+
+  public async deleteEquipmentProfile(id: string): Promise<void> {
+    const res = await fetch(`/api/network-audit/profile/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      throw new Error('Falha ao remover perfil de equipamento.');
+    }
+  }
+
+  public async saveEquipmentCredential(cred: EquipmentCredential): Promise<void> {
+    const res = await fetch('/api/network-audit/credential', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cred)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Falha ao salvar credencial de equipamento.');
+    }
+  }
+
+  public async deleteEquipmentCredential(id: string): Promise<void> {
+    const res = await fetch(`/api/network-audit/credential/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      throw new Error('Falha ao remover credencial.');
+    }
+  }
+
+  public async testEquipmentCredential(id: string): Promise<{ success: boolean; message: string; banner?: string; latencyMs?: number }> {
+    const res = await fetch('/api/network-audit/test-credential', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    return res.json();
   }
 }
 

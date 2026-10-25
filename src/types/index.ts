@@ -216,3 +216,131 @@ export interface AnalysisParameters {
   enableAudioAlerts: boolean;
   enableDesktopBanners: boolean;
 }
+
+// ==========================================
+// Web Vulnerability Scanner Types
+// ==========================================
+export type WebSeverityFilter = 'all' | 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+export interface WebVulnerability {
+  id: string;
+  title: string;
+  severity: SeverityLevel;
+  category: 'ssl_tls' | 'http_headers' | 'cors' | 'sensitive_exposure' | 'cookies' | 'owasp_hygiene';
+  cwe?: string;
+  description: string;
+  impact: string;
+  evidence?: string;
+  remediation: string;
+  codeSnippet?: string;
+}
+
+export interface WebScanResult {
+  id: string;
+  targetUrl: string;
+  timestamp: string;
+  scanDurationMs: number;
+  securityScore: number; // 0 to 100
+  testedLevel: WebSeverityFilter;
+  headersInspected: Record<string, string>;
+  missingHeaders: string[];
+  sslStatus: {
+    valid: boolean;
+    issuer?: string;
+    daysRemaining?: number;
+    protocol?: string;
+    error?: string;
+  };
+  vulnerabilities: WebVulnerability[];
+  aiExecutiveSummary?: string;
+  aiRemediationRoadmap?: string[];
+}
+
+// ==========================================
+// Internal Network Audit & Equipment Diagnostic Types
+// ==========================================
+export type EquipmentBrand = 
+  | 'cisco' 
+  | 'mikrotik' 
+  | 'ubiquiti' 
+  | 'tplink' 
+  | 'fortinet' 
+  | 'pfsense' 
+  | 'huawei' 
+  | 'intelbras' 
+  | 'generic';
+
+export interface EquipmentProfile {
+  id: string;
+  name: string;
+  brand: EquipmentBrand;
+  model: string;
+  expectedIp?: string;
+  expectedRole: 'gateway' | 'core_switch' | 'access_switch' | 'firewall' | 'access_point';
+  firmwareVersion?: string;
+  notes?: string;
+}
+
+export interface EquipmentCredential {
+  id: string;
+  profileId?: string;
+  targetIp: string;
+  targetPort: number;
+  protocol: 'ssh' | 'snmp_v2c' | 'snmp_v3' | 'telnet' | 'https_api';
+  username: string;
+  password?: string;
+  snmpCommunity?: string;
+  isReadOnly: boolean;
+  authStatus: 'untested' | 'valid' | 'failed' | 'testing';
+  lastTested?: string;
+  errorMessage?: string;
+}
+
+export interface NetworkAuditIssue {
+  id: string;
+  category: 'rogue_dhcp' | 'dns_health' | 'routing_loop' | 'equipment_config' | 'mtu_mismatch' | 'broadcast_storm' | 'unauthorized_gateway';
+  severity: SeverityLevel;
+  title: string;
+  description: string;
+  affectedTarget: string;
+  recommendation: string;
+  kaliCommand?: string;
+}
+
+export interface NetworkDiagnosticResult {
+  id: string;
+  timestamp: string;
+  dhcpServersFound: Array<{
+    ip: string;
+    mac: string;
+    isAuthorized: boolean;
+    offerSubnet?: string;
+    serverIdentifier?: string;
+  }>;
+  dnsServersTested: Array<{
+    ip: string;
+    latencyMs: number;
+    status: 'healthy' | 'slow' | 'unresponsive' | 'loop';
+    testDomain: string;
+  }>;
+  routingHealth: {
+    defaultGateway: string;
+    gatewayResponding: boolean;
+    hopCount: number;
+    packetLossPercent: number;
+    isRedundant: boolean;
+    statusText: string;
+  };
+  equipmentsAudited: Array<{
+    ip: string;
+    brand: string;
+    model: string;
+    authSuccess: boolean;
+    findingsCount: number;
+    healthScore: number;
+    details?: string;
+  }>;
+  issues: NetworkAuditIssue[];
+  aiDiagnosticSummary?: string;
+  aiActionPlan?: string[];
+}
