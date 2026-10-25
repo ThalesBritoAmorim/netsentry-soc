@@ -880,9 +880,17 @@ def run_network_audit_py():
     }
 
 class RestApiHandler(BaseHTTPRequestHandler):
-    # Ocultar versão do servidor e do Python (CWE-200)
-    server_version = "NetSentry"
+    # Ocultar versão e tecnologia do servidor (CWE-200)
+    server_version = ""
     sys_version = ""
+
+    def version_string(self):
+        return ""
+
+    def send_response(self, code, message=None):
+        """Suprime completamente a emissão do cabeçalho Server (CWE-200)"""
+        self.send_response_only(code, message)
+        self.send_header("Date", self.date_time_string())
 
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -892,6 +900,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https://fonts.googleapis.com https://fonts.gstatic.com; connect-src *;")
         super().end_headers()
 
     def do_OPTIONS(self):

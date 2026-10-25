@@ -15,10 +15,18 @@ app.use((req, res, next) => {
     return res.status(404).send('Not Found');
   }
 
-  // 2. Cabeçalhos HTTP Defensivos
+  // 2. Remoção de Identificação de Servidor / Tecnologia (CWE-200)
+  res.removeHeader('Server');
+  res.removeHeader('X-Powered-By');
+
+  // 3. Cabeçalhos HTTP Defensivos & Content-Security-Policy (CWE-1021)
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https://fonts.googleapis.com https://fonts.gstatic.com; connect-src *;"
+  );
 
   // Proteção contra Clickjacking
   // Em produção independente aplica SAMEORIGIN
