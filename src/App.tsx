@@ -236,8 +236,11 @@ export default function App() {
 
         {activeTab === 'network-audit' && (
           <NetworkAuditView
+            devices={engineState.devices}
             onOpenKaliTerminal={handleOpenTerminalWithCommand}
             onToast={showToast}
+            onOpenAIForensic={handleOpenAIForensic}
+            onScanSubnet={handleScanSubnet}
           />
         )}
 

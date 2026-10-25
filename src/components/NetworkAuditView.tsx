@@ -30,19 +30,28 @@ import {
   NetworkDiagnosticResult, 
   EquipmentBrand,
   NetworkAuditIssue,
-  SeverityLevel
+  SeverityLevel,
+  NetworkDevice
 } from '../types';
 import { networkEngine } from '../services/networkEngine';
+import { NetworkTopologyVisualizer } from './NetworkTopologyVisualizer';
 
 interface NetworkAuditViewProps {
+  devices?: NetworkDevice[];
   onOpenKaliTerminal?: (cmd: string) => void;
   onToast?: (msg: string, type?: 'success' | 'alert') => void;
+  onOpenAIForensic?: (type: 'device', device: NetworkDevice) => void;
+  onScanSubnet?: (deep?: boolean) => void;
 }
 
 export const NetworkAuditView: React.FC<NetworkAuditViewProps> = ({
+  devices = [],
   onOpenKaliTerminal,
-  onToast
+  onToast,
+  onOpenAIForensic,
+  onScanSubnet
 }) => {
+  const [activeAuditTab, setActiveAuditTab] = useState<'topology' | 'diagnostic' | 'hardware'>('topology');
   const [isRunningDiag, setIsRunningDiag] = useState(false);
   const [diagResult, setDiagResult] = useState<NetworkDiagnosticResult | null>(null);
   
@@ -378,9 +387,74 @@ export const NetworkAuditView: React.FC<NetworkAuditViewProps> = ({
         </div>
       )}
 
-      {/* 4. AI Deep Forensic Diagnostic by Brand & Model */}
-      {diagResult?.aiDiagnosticSummary && (
-        <div className="p-5 rounded-xl bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-indigo-800/60 shadow-lg space-y-3">
+      {/* 4. Sub-Navigation Tabs */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-2 overflow-x-auto">
+        <button
+          onClick={() => setActiveAuditTab('topology')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+            activeAuditTab === 'topology'
+              ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-700/80 shadow-md'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+          }`}
+        >
+          <Network className="w-4 h-4 text-cyan-400" />
+          <span>Topologia de Rede D3.js</span>
+          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-bold">
+            Mapeamento Nmap
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveAuditTab('diagnostic')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+            activeAuditTab === 'diagnostic'
+              ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-700/80 shadow-md'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+          }`}
+        >
+          <Activity className="w-4 h-4 text-cyan-400" />
+          <span>Diagnóstico de Infra & DHCP</span>
+          {diagResult && diagResult.issues.length > 0 && (
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-800 font-bold">
+              {diagResult.issues.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveAuditTab('hardware')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+            activeAuditTab === 'hardware'
+              ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-700/80 shadow-md'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+          }`}
+        >
+          <Layers className="w-4 h-4 text-cyan-400" />
+          <span>Catálogo de Hardware & View</span>
+          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-bold">
+            {profiles.length}
+          </span>
+        </button>
+      </div>
+
+      {/* Tab 1: D3.js Network Topology Visualizer */}
+      {activeAuditTab === 'topology' && (
+        <NetworkTopologyVisualizer
+          devices={devices}
+          profiles={profiles}
+          diagResult={diagResult}
+          onOpenKaliTerminal={onOpenKaliTerminal}
+          onOpenAIForensic={onOpenAIForensic}
+          onScanSubnet={onScanSubnet}
+          onToast={onToast}
+        />
+      )}
+
+      {/* Tab 2: AI Deep Forensic Diagnostic by Brand & Model */}
+      {activeAuditTab === 'diagnostic' && (
+        <div className="space-y-6">
+          {diagResult?.aiDiagnosticSummary && (
+            <div className="p-5 rounded-xl bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-indigo-800/60 shadow-lg space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <div className="p-1.5 rounded-md bg-indigo-950 border border-indigo-700 text-cyan-400">
@@ -466,9 +540,12 @@ export const NetworkAuditView: React.FC<NetworkAuditViewProps> = ({
           </div>
         </div>
       )}
+        </div>
+      )}
 
-      {/* 6. Equipment Brand & Model Hardware Catalog & View Credentials Manager */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+      {/* Tab 3: Equipment Brand & Model Hardware Catalog & View Credentials Manager */}
+      {activeAuditTab === 'hardware' && (
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* Left Column (7 cols): Hardware Catalog with Brands and Models */}
         <div className="xl:col-span-7 p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4">
           <div className="flex items-center justify-between">
@@ -620,6 +697,7 @@ export const NetworkAuditView: React.FC<NetworkAuditViewProps> = ({
           </div>
         </div>
       </div>
+      )}
 
       {/* Modal: Novo Equipamento */}
       {showAddProfileModal && (
