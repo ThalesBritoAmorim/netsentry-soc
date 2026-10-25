@@ -28,6 +28,7 @@ import {
   BarChart2,
   Radio
 } from 'lucide-react';
+import { D3LiveThroughputChart } from './D3LiveThroughputChart';
 import { NetworkTrafficChart } from './NetworkTrafficChart';
 import { IncidentHeatmapChart } from './IncidentHeatmapChart';
 import { RealtimeTrafficOverview } from './RealtimeTrafficOverview';
@@ -62,7 +63,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onUnblockHost
 }) => {
   const [filterSeverity, setFilterSeverity] = useState<'all' | 'critical' | 'high' | 'active'>('all');
-  const [analyticsLayout, setAnalyticsLayout] = useState<'split' | 'traffic' | 'heatmap'>('split');
+  const [analyticsLayout, setAnalyticsLayout] = useState<'split' | 'd3' | 'traffic' | 'heatmap'>('split');
 
   const activeAlerts = alerts.filter(a => a.status === 'active' || a.status === 'investigating');
   const criticalCount = alerts.filter(a => a.severity === 'critical' && a.status === 'active').length;
@@ -239,12 +240,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               Telemetria & Padrões Táticos de Rede
             </span>
             <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800/80">
-              Recharts 3.10
+              D3.js v7 + Recharts
             </span>
           </div>
 
-          {/* Interactive Layout Controls: Split vs Traffic vs Heatmap */}
+          {/* Interactive Layout Controls: D3 vs Split vs Recharts vs Heatmap */}
           <div className="flex items-center gap-1 p-1 bg-slate-900 rounded-lg border border-slate-800 self-start sm:self-auto text-xs">
+            <button
+              onClick={() => setAnalyticsLayout('d3')}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-medium transition-colors ${
+                analyticsLayout === 'd3' 
+                  ? 'bg-slate-800 text-cyan-300 font-semibold shadow-sm' 
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Vazão ao Vivo em bps com D3.js e Detecção de Picos de Tráfego"
+            >
+              <Zap className="w-3.5 h-3.5 text-cyan-400" />
+              <span>D3 Live Throughput (bps)</span>
+            </button>
             <button
               onClick={() => setAnalyticsLayout('split')}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded font-medium transition-colors ${
@@ -252,7 +265,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   ? 'bg-slate-800 text-slate-100 font-semibold shadow-sm' 
                   : 'text-slate-400 hover:text-slate-200'
               }`}
-              title="Exibir Gráfico de Tráfego e Mapa de Calor lado a lado"
+              title="Exibir Gráfico D3.js de Throughput e Mapa de Calor lado a lado"
             >
               <Split className="w-3.5 h-3.5 text-cyan-400" />
               <span>Lado a Lado (SOC)</span>
@@ -264,10 +277,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   ? 'bg-slate-800 text-slate-100 font-semibold shadow-sm' 
                   : 'text-slate-400 hover:text-slate-200'
               }`}
-              title="Expandir visualização de fluxo e vazão por interface"
+              title="Visualização Recharts por interface de rede"
             >
               <Activity className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Tráfego bps</span>
+              <span>Recharts Interface</span>
             </button>
             <button
               onClick={() => setAnalyticsLayout('heatmap')}
@@ -284,14 +297,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* Viewport-Adaptive Container: Split Grid or Single Maximize */}
+        {/* Viewport-Adaptive Container: D3 Live or Split Grid or Single Maximize */}
         {analyticsLayout === 'split' ? (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start min-w-0">
             <div className="min-w-0 w-full overflow-hidden">
-              <NetworkTrafficChart 
+              <D3LiveThroughputChart 
                 metrics={metrics} 
                 alerts={alerts} 
                 trafficFlows={trafficFlows} 
+                onOpenKaliTerminal={onOpenKaliTerminal}
               />
             </div>
             <div className="min-w-0 w-full overflow-hidden">
@@ -300,6 +314,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 onSelectCategory={(cat) => onSimulateAttack(cat)}
               />
             </div>
+          </div>
+        ) : analyticsLayout === 'd3' ? (
+          <div className="min-w-0 w-full overflow-hidden">
+            <D3LiveThroughputChart 
+              metrics={metrics} 
+              alerts={alerts} 
+              trafficFlows={trafficFlows} 
+              onOpenKaliTerminal={onOpenKaliTerminal}
+            />
           </div>
         ) : analyticsLayout === 'traffic' ? (
           <div className="min-w-0 w-full overflow-hidden">
