@@ -35,6 +35,7 @@ import {
 } from '../types';
 import { networkEngine } from '../services/networkEngine';
 import { NetworkTopologyVisualizer } from './NetworkTopologyVisualizer';
+import { SecureCredentialsForm } from './SecureCredentialsForm';
 
 interface NetworkAuditViewProps {
   devices?: NetworkDevice[];
@@ -51,7 +52,7 @@ export const NetworkAuditView: React.FC<NetworkAuditViewProps> = ({
   onOpenAIForensic,
   onScanSubnet
 }) => {
-  const [activeAuditTab, setActiveAuditTab] = useState<'topology' | 'diagnostic' | 'hardware'>('topology');
+  const [activeAuditTab, setActiveAuditTab] = useState<'topology' | 'credentials' | 'diagnostic' | 'hardware'>('credentials');
   const [isRunningDiag, setIsRunningDiag] = useState(false);
   const [diagResult, setDiagResult] = useState<NetworkDiagnosticResult | null>(null);
   
@@ -405,6 +406,21 @@ export const NetworkAuditView: React.FC<NetworkAuditViewProps> = ({
         </button>
 
         <button
+          onClick={() => setActiveAuditTab('credentials')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+            activeAuditTab === 'credentials'
+              ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-700/80 shadow-md'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+          }`}
+        >
+          <Key className="w-4 h-4 text-cyan-400" />
+          <span>Credenciais Seguras & SNMP</span>
+          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 font-bold">
+            SNMPv3 / View
+          </span>
+        </button>
+
+        <button
           onClick={() => setActiveAuditTab('diagnostic')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
             activeAuditTab === 'diagnostic'
@@ -446,6 +462,17 @@ export const NetworkAuditView: React.FC<NetworkAuditViewProps> = ({
           onOpenKaliTerminal={onOpenKaliTerminal}
           onOpenAIForensic={onOpenAIForensic}
           onScanSubnet={onScanSubnet}
+          onToast={onToast}
+        />
+      )}
+
+      {/* Tab 2: Secure Credentials & SNMP Diagnostic Form */}
+      {activeAuditTab === 'credentials' && (
+        <SecureCredentialsForm
+          profiles={profiles}
+          credentials={credentials}
+          onRefresh={loadEquipments}
+          onOpenKaliTerminal={onOpenKaliTerminal}
           onToast={onToast}
         />
       )}

@@ -287,16 +287,33 @@ export interface EquipmentProfile {
 export interface EquipmentCredential {
   id: string;
   profileId?: string;
+  profileName?: string;
   targetIp: string;
   targetPort: number;
   protocol: 'ssh' | 'snmp_v2c' | 'snmp_v3' | 'telnet' | 'https_api';
   username: string;
   password?: string;
   snmpCommunity?: string;
+  // SNMPv3 Auth & Priv fields for Nmap / scripts
+  snmpSecLevel?: 'noAuthNoPriv' | 'authNoPriv' | 'authPriv';
+  snmpAuthProtocol?: 'SHA' | 'SHA-256' | 'MD5';
+  snmpAuthPassphrase?: string;
+  snmpPrivProtocol?: 'AES' | 'AES-256' | 'DES';
+  snmpPrivPassphrase?: string;
+  snmpContext?: string;
   isReadOnly: boolean;
   authStatus: 'untested' | 'valid' | 'failed' | 'testing';
   lastTested?: string;
   errorMessage?: string;
+  notes?: string;
+  hardwareInfo?: {
+    sysDescr?: string;
+    chassisModel?: string;
+    serialNumber?: string;
+    firmwareVersion?: string;
+    interfacesCount?: number;
+    uptime?: string;
+  };
 }
 
 export interface NetworkAuditIssue {
