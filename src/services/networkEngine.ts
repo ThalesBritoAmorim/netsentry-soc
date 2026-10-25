@@ -264,9 +264,15 @@ class NetworkEngine {
                 const vendor = (!d.vendor || d.vendor === 'Desconhecido' || d.vendor === 'Hardware Conectado')
                   ? getClientVendor(d.mac)
                   : d.vendor;
+                const isLegacyWorkgroup = d.hostname === 'WORKGROUP';
+                const domain = d.domain || (isLegacyWorkgroup ? 'WORKGROUP' : undefined);
+                const rawHost = isLegacyWorkgroup ? '' : d.hostname;
+
                 return {
                   ...d,
-                  hostname: alias || d.hostname || `host-${d.ip.split('.').pop()}`,
+                  hostname: alias || rawHost || `host-${d.ip.split('.').pop()}`,
+                  domain,
+                  workgroup: d.workgroup || domain,
                   customAlias: alias,
                   vendor,
                   discoveryMethod: alias ? 'manual' : (d.discoveryMethod || 'arp'),

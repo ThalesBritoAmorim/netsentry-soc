@@ -370,11 +370,20 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
                             )}
                           </div>
                         )}
-                        <div className="flex items-center gap-2 mt-0.5">
+                        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                           <span className="text-[11px] text-slate-500 font-sans">
                             {getDeviceLabel(dev.deviceType)}
                           </span>
                           {getDiscoveryBadge(dev.discoveryMethod)}
+                          {(dev.domain || dev.workgroup) && (
+                            <span 
+                              className="inline-flex items-center gap-1 text-[10px] font-mono bg-indigo-950/80 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-800/70"
+                              title={`Domínio / Grupo de Trabalho da Rede: ${dev.domain || dev.workgroup}`}
+                            >
+                              <span className="text-indigo-400 font-sans font-semibold">Domínio:</span>
+                              <span className="font-bold">{dev.domain || dev.workgroup}</span>
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -482,9 +491,14 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
                   {getDeviceIcon(selectedDevice.deviceType)}
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold text-slate-100 flex items-center gap-2">
+                  <h3 className="text-base font-semibold text-slate-100 flex items-center gap-2 flex-wrap">
                     <span>{selectedDevice.hostname}</span>
                     <span className="text-xs font-mono text-slate-400">({selectedDevice.ip})</span>
+                    {(selectedDevice.domain || selectedDevice.workgroup) && (
+                      <span className="text-xs font-mono bg-indigo-950/80 text-indigo-300 px-2 py-0.5 rounded border border-indigo-800/80">
+                        Domínio: {selectedDevice.domain || selectedDevice.workgroup}
+                      </span>
+                    )}
                   </h3>
                   <div className="text-xs text-slate-400 mt-0.5">
                     {getDeviceLabel(selectedDevice.deviceType)} · {selectedDevice.vendor}
@@ -546,10 +560,18 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
               </div>
 
               {/* Telemetry Summary */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                 <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                   <span className="text-slate-500 block">Endereço MAC</span>
-                  <span className="font-mono text-slate-200 font-semibold">{selectedDevice.mac}</span>
+                  <span className="font-mono text-slate-200 font-semibold text-[11px] truncate block" title={selectedDevice.mac}>
+                    {selectedDevice.mac}
+                  </span>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                  <span className="text-slate-500 block">Domínio / Workgroup</span>
+                  <span className="font-mono text-indigo-300 font-semibold text-[11px] truncate block" title={selectedDevice.domain || selectedDevice.workgroup || 'Não identificado'}>
+                    {selectedDevice.domain || selectedDevice.workgroup || '—'}
+                  </span>
                 </div>
                 <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                   <span className="text-slate-500 block">Postura de Risco</span>
@@ -563,7 +585,7 @@ export const DevicesView: React.FC<DevicesViewProps> = ({
                 </div>
                 <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                   <span className="text-slate-500 block">Última Atividade</span>
-                  <span className="text-emerald-400">{selectedDevice.lastSeen}</span>
+                  <span className="text-emerald-400 truncate block">{selectedDevice.lastSeen}</span>
                 </div>
               </div>
 

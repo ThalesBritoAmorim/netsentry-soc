@@ -43,6 +43,8 @@ export interface NetworkDevice {
   notes?: string;
   discoveryMethod?: 'dns' | 'netbios' | 'mdns' | 'dhcp' | 'arp' | 'manual';
   customAlias?: string;
+  domain?: string;
+  workgroup?: string;
 }
 
 export interface MitigationPlaybook {

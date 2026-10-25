@@ -88,6 +88,7 @@ app.get('/api/kali/status', async (_req, res) => {
 });
 
 import { promises as dnsPromises } from 'dns';
+import dgram from 'dgram';
 
 // In-memory alias store for custom device names
 const deviceAliases: Record<string, string> = {};
@@ -150,13 +151,112 @@ function lookupVendor(mac: string): string {
   return OUI_MAP[prefix] || 'Dispositivo de Rede IEEE';
 }
 
-async function resolveHostnameWithTimeout(ip: string, timeoutMs: number = 800): Promise<string | null> {
+/**
+ * NetBIOS Node Status Query (RFC 1002 UDP 137).
+ * Parses both Unique Name (Computer Name) and Group Name (Domain / Workgroup).
+ */
+async function queryNetbiosIdentity(ip: string, timeoutMs = 800): Promise<{ hostname?: string; domain?: string } | null> {
+  return new Promise((resolve) => {
+    try {
+      const client = dgram.createSocket('udp4');
+      // NetBIOS Node Status wildcard query (*\x00\x00...)
+      const query = Buffer.from(
+        '80000000000100000000000020434b4141414141414141414141414141414141414141414141414141414141410000210001',
+        'hex'
+      );
+      let isSettled = false;
+
+      const timer = setTimeout(() => {
+        if (!isSettled) {
+          isSettled = true;
+          try { client.close(); } catch {}
+          resolve(null);
+        }
+      }, timeoutMs);
+
+      client.on('error', () => {
+        if (!isSettled) {
+          isSettled = true;
+          clearTimeout(timer);
+          try { client.close(); } catch {}
+          resolve(null);
+        }
+      });
+
+      client.on('message', (msg) => {
+        if (isSettled) return;
+        isSettled = true;
+        clearTimeout(timer);
+        try { client.close(); } catch {}
+
+        try {
+          // Locate Answer RR Type 0x0021, Class 0x0001
+          const marker = Buffer.from([0x00, 0x21, 0x00, 0x01]);
+          const pos = msg.indexOf(marker, 12);
+          if (pos !== -1 && pos + 10 < msg.length) {
+            const numNames = msg[pos + 10];
+            let compName: string | undefined;
+            let domainName: string | undefined;
+            let offset = pos + 11;
+
+            for (let i = 0; i < numNames && offset + 18 <= msg.length; i++) {
+              const rawName = msg.subarray(offset, offset + 15).toString('latin1').trim();
+              const suffix = msg[offset + 15];
+              const flags = msg.readUInt16BE(offset + 16);
+              const isGroup = Boolean(flags & 0x8000);
+              const cleanName = rawName.replace(/[^a-zA-Z0-9_\-]/g, '');
+
+              if (cleanName && cleanName.length >= 2) {
+                if (isGroup) {
+                  if (!domainName) domainName = cleanName;
+                } else {
+                  if (!compName || suffix === 0x00 || suffix === 0x20) {
+                    compName = cleanName;
+                  }
+                }
+              }
+              offset += 18;
+            }
+            if (compName || domainName) {
+              return resolve({ hostname: compName, domain: domainName });
+            }
+          }
+        } catch {}
+        resolve(null);
+      });
+
+      client.send(query, 137, ip, (err) => {
+        if (err && !isSettled) {
+          isSettled = true;
+          clearTimeout(timer);
+          try { client.close(); } catch {}
+          resolve(null);
+        }
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Reverse DNS resolution that separates Hostname and Domain.
+ */
+async function resolveDnsIdentity(ip: string, timeoutMs: number = 800): Promise<{ hostname?: string; domain?: string } | null> {
   try {
     const reversePromise = dnsPromises.reverse(ip);
     const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs));
     const result = await Promise.race([reversePromise, timeoutPromise]);
     if (result && Array.isArray(result) && result.length > 0) {
-      return result[0].replace(/\.$/, '');
+      const full = result[0].replace(/\.$/, '');
+      const parts = full.split('.');
+      if (parts.length > 1) {
+        return {
+          hostname: parts[0],
+          domain: parts.slice(1).join('.'),
+        };
+      }
+      return { hostname: full };
     }
   } catch {
     // reverse DNS query failed / no PTR record
@@ -168,7 +268,7 @@ app.get('/api/kali/devices', async (_req, res) => {
   const data = await queryKaliAgent('/api/devices');
   const rawDevices = (Array.isArray(data) ? data : []) as any[];
 
-  // Enrich devices with DNS reverse PTR, OUI vendor lookup and stored aliases
+  // Enrich devices with DNS PTR, NetBIOS identity, OUI vendor lookup and stored aliases
   const enriched = await Promise.all(
     rawDevices.map(async (dev) => {
       const mac = dev.mac || '';
@@ -179,27 +279,56 @@ app.get('/api/kali/devices', async (_req, res) => {
         : currentVendor;
 
       let hostname = dev.hostname || '';
+      let domain = dev.domain || dev.workgroup || '';
       let discoveryMethod = dev.discoveryMethod || 'arp';
+
+      // If previous version saved "WORKGROUP" in hostname, correct it
+      if (hostname.toUpperCase() === 'WORKGROUP') {
+        domain = 'WORKGROUP';
+        hostname = '';
+      }
 
       // Check stored custom alias first
       if (deviceAliases[ip] || deviceAliases[mac]) {
         hostname = deviceAliases[ip] || deviceAliases[mac];
         discoveryMethod = 'manual';
-      } else if (!hostname || hostname.startsWith('host-') || hostname === 'unknown-host') {
-        // Attempt quick PTR resolution
-        const resolved = await resolveHostnameWithTimeout(ip);
-        if (resolved) {
-          hostname = resolved;
-          discoveryMethod = 'dns';
-        } else if (ip.endsWith('.1')) {
-          hostname = 'gateway.local (Roteador)';
-          discoveryMethod = 'dhcp';
+      } else if (!hostname || hostname.startsWith('host-') || hostname === 'unknown-host' || !domain) {
+        // 1. Try NetBIOS (gets both computer name AND domain/workgroup)
+        const nb = await queryNetbiosIdentity(ip);
+        if (nb) {
+          if (nb.hostname && (!hostname || hostname.startsWith('host-') || hostname === 'unknown-host')) {
+            hostname = nb.hostname;
+            discoveryMethod = 'netbios';
+          }
+          if (nb.domain && !domain) {
+            domain = nb.domain;
+          }
+        }
+
+        // 2. Try Reverse DNS if still missing hostname or domain
+        if (!hostname || hostname.startsWith('host-') || hostname === 'unknown-host' || !domain) {
+          const dnsInfo = await resolveDnsIdentity(ip);
+          if (dnsInfo) {
+            if (dnsInfo.hostname && (!hostname || hostname.startsWith('host-') || hostname === 'unknown-host')) {
+              hostname = dnsInfo.hostname;
+              discoveryMethod = 'dns';
+            }
+            if (dnsInfo.domain && !domain) {
+              domain = dnsInfo.domain;
+            }
+          } else if (ip.endsWith('.1')) {
+            hostname = 'gateway';
+            domain = 'local';
+            discoveryMethod = 'dhcp';
+          }
         }
       }
 
       return {
         ...dev,
         hostname: hostname || `host-${ip.split('.').pop()}`,
+        domain: domain || undefined,
+        workgroup: domain || undefined,
         vendor: detectedVendor,
         discoveryMethod,
         customAlias: deviceAliases[ip] || deviceAliases[mac] || undefined,

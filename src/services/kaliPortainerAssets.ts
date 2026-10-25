@@ -148,59 +148,92 @@ services:
         # Caches de resolucao
         dhcp_names = {}
         resolved_hosts = {}
+        resolved_domains = {}
 
-        def query_netbios_name(ip):
+        def query_netbios_identity(ip):
             try:
                 query = b'\x80\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00 CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00\x00!\x00\x01'
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.settimeout(0.7)
+                sock.settimeout(0.8)
                 sock.sendto(query, (ip, 137))
-                data, _ = sock.recvfrom(1024)
+                data, _ = sock.recvfrom(2048)
                 sock.close()
-                if len(data) > 57:
-                    num_names = data[56]
-                    if num_names > 0:
-                        raw_name = data[57:57+15].decode('latin1', errors='ignore').strip()
-                        clean_name = ''.join(c for c in raw_name if c.isalnum() or c in '-_')
-                        if clean_name and len(clean_name) >= 2:
-                            return clean_name
+                if len(data) < 56:
+                    return None, None
+                pos = data.find(b'\x00\x21\x00\x01', 12)
+                if pos == -1:
+                    return None, None
+                num_names_offset = pos + 10
+                if len(data) <= num_names_offset:
+                    return None, None
+                num_names = data[num_names_offset]
+                comp_name = None
+                domain_name = None
+                offset = num_names_offset + 1
+                for _ in range(num_names):
+                    if offset + 18 > len(data):
+                        break
+                    raw_n = data[offset:offset+15].decode('latin1', errors='ignore').strip()
+                    suffix = data[offset+15]
+                    flags = (data[offset+16] << 8) | data[offset+17]
+                    is_group = bool(flags & 0x8000)
+                    clean_n = ''.join(c for c in raw_n if c.isalnum() or c in '-_')
+                    if clean_n and len(clean_n) >= 2:
+                        if is_group:
+                            if not domain_name:
+                                domain_name = clean_n
+                        else:
+                            if not comp_name or suffix == 0x00 or suffix == 0x20:
+                                comp_name = clean_n
+                    offset += 18
+                return comp_name, domain_name
             except Exception:
                 pass
-            return None
+            return None, None
 
         def query_reverse_dns(ip):
             try:
                 host, _, _ = socket.gethostbyaddr(ip)
                 if host and host != ip:
-                    return host
+                    parts = host.split('.')
+                    if len(parts) > 1:
+                        return parts[0], '.'.join(parts[1:])
+                    return host, None
             except Exception:
                 pass
-            return None
+            return None, None
 
         def resolve_device_identity(ip, mac, suggested_name=None):
             if suggested_name and not suggested_name.startswith('host-') and suggested_name != 'unknown-host':
-                return suggested_name, 'dns'
+                parts = suggested_name.split('.')
+                h = parts[0]
+                d = '.'.join(parts[1:]) if len(parts) > 1 else resolved_domains.get(ip)
+                return h, 'dns', d
             if ip in dhcp_names:
-                return dhcp_names[ip], 'dhcp'
+                return dhcp_names[ip], 'dhcp', resolved_domains.get(ip)
             if mac in dhcp_names:
-                return dhcp_names[mac], 'dhcp'
+                return dhcp_names[mac], 'dhcp', resolved_domains.get(ip)
             if ip in resolved_hosts:
-                return resolved_hosts[ip]
-            # Tenta NetBIOS (muito efetivo para Windows e Samba)
-            nb = query_netbios_name(ip)
-            if nb:
-                resolved_hosts[ip] = (nb, 'netbios')
-                return nb, 'netbios'
+                h, m = resolved_hosts[ip]
+                return h, m, resolved_domains.get(ip)
+            # Tenta NetBIOS (extrai Nome do Computador E Domínio/Workgroup)
+            nb_comp, nb_dom = query_netbios_identity(ip)
+            if nb_comp or nb_dom:
+                if nb_dom: resolved_domains[ip] = nb_dom
+                h = nb_comp or f"host-{ip.split('.')[-1]}"
+                resolved_hosts[ip] = (h, 'netbios')
+                return h, 'netbios', nb_dom
             # Tenta Reverse DNS (PTR)
-            rdns = query_reverse_dns(ip)
-            if rdns:
-                resolved_hosts[ip] = (rdns, 'dns')
-                return rdns, 'dns'
+            rdns_h, rdns_d = query_reverse_dns(ip)
+            if rdns_h:
+                if rdns_d: resolved_domains[ip] = rdns_d
+                resolved_hosts[ip] = (rdns_h, 'dns')
+                return rdns_h, 'dns', rdns_d
             # Heuristica de Gateway
             if ip.endswith('.1'):
-                return 'gateway.local (Roteador)', 'dhcp'
+                return 'gateway', 'dhcp', 'local'
             fallback = f"host-{ip.split('.')[-1]}"
-            return fallback, 'arp'
+            return fallback, 'arp', resolved_domains.get(ip)
 
         conn = None
         # Auto-identificacao e Protecao contra Auto-Bloqueio (Self-Protection & Gateway Protection)
@@ -298,6 +331,7 @@ services:
                                 ip VARCHAR(45) NOT NULL UNIQUE,
                                 mac VARCHAR(17) NOT NULL UNIQUE,
                                 hostname VARCHAR(128) DEFAULT 'unknown-host',
+                                domain VARCHAR(128),
                                 vendor VARCHAR(128) DEFAULT 'Desconhecido',
                                 device_type VARCHAR(32) DEFAULT 'unknown',
                                 trust_level VARCHAR(32) DEFAULT 'unverified',
@@ -310,6 +344,7 @@ services:
                                 first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                             );
+                            ALTER TABLE network_devices ADD COLUMN IF NOT EXISTS domain VARCHAR(128);
                             CREATE TABLE IF NOT EXISTS threat_alerts (
                                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -450,21 +485,23 @@ services:
 
                 # Identifica e cadastra dispositivo
                 try:
-                    hname, method = resolve_device_identity(src_ip, src_mac)
+                    hname, method, dom_name = resolve_device_identity(src_ip, src_mac)
                     vendor = get_vendor(src_mac)
                     dtype = "gateway" if src_ip.endswith(".1") else "workstation"
                     with conn.cursor() as cur:
                         cur.execute("""
-                            INSERT INTO network_devices (id, ip, mac, hostname, vendor, device_type, discovery_method, is_online, last_seen)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                            INSERT INTO network_devices (id, ip, mac, hostname, domain, vendor, device_type, discovery_method, is_online, last_seen)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
                             ON CONFLICT (ip) DO UPDATE SET 
                                 last_seen = CURRENT_TIMESTAMP, 
                                 is_online = TRUE,
+                                domain = COALESCE(EXCLUDED.domain, network_devices.domain),
                                 vendor = CASE WHEN network_devices.vendor = 'Desconhecido' THEN EXCLUDED.vendor ELSE network_devices.vendor END,
                                 hostname = CASE WHEN network_devices.custom_alias IS NOT NULL THEN network_devices.hostname 
+                                                WHEN network_devices.hostname = 'WORKGROUP' THEN EXCLUDED.hostname
                                                 WHEN network_devices.hostname LIKE 'host-%%' THEN EXCLUDED.hostname 
                                                 ELSE network_devices.hostname END;
-                        """, (f"dev-{src_ip.replace('.', '-')}", src_ip, src_mac, hname, vendor, dtype, method))
+                        """, (f"dev-{src_ip.replace('.', '-')}", src_ip, src_mac, hname, dom_name, vendor, dtype, method))
                 except Exception:
                     pass
 
@@ -557,7 +594,7 @@ services:
                     devices = []
                     try:
                         with conn.cursor() as cur:
-                            cur.execute("SELECT id, ip, mac, hostname, vendor, threat_score, trust_level, last_seen, discovery_method, custom_alias FROM network_devices ORDER BY last_seen DESC;")
+                            cur.execute("SELECT id, ip, mac, hostname, vendor, threat_score, trust_level, last_seen, discovery_method, custom_alias, domain FROM network_devices ORDER BY last_seen DESC;")
                             rows = cur.fetchall()
                             for r in rows:
                                 ip_addr = r[1]
@@ -566,20 +603,31 @@ services:
                                 vendor_name = r[4] or get_vendor(mac_addr)
                                 disc_method = r[8] or "arp"
                                 custom_alias = r[9]
+                                stored_dom = r[10] if len(r) > 10 else None
 
-                                # Se o hostname ainda for genérico ou vazio, tenta resolver agora
                                 effective_name = custom_alias or stored_name
-                                if not effective_name or effective_name.startswith("host-") or effective_name == "unknown-host":
-                                    resolved, m = resolve_device_identity(ip_addr, mac_addr)
+                                effective_dom = stored_dom or resolved_domains.get(ip_addr)
+
+                                # Se o hostname anterior estava gravado incorretamente como WORKGROUP
+                                if effective_name == "WORKGROUP":
+                                    effective_dom = "WORKGROUP"
+                                    effective_name = ""
+
+                                if not effective_name or effective_name.startswith("host-") or effective_name == "unknown-host" or not effective_dom:
+                                    resolved, m, d = resolve_device_identity(ip_addr, mac_addr)
                                     if resolved and not resolved.startswith("host-"):
                                         effective_name = resolved
                                         disc_method = m
+                                    if d and not effective_dom:
+                                        effective_dom = d
 
                                 devices.append({
                                     "id": r[0],
                                     "ip": ip_addr,
                                     "mac": mac_addr,
                                     "hostname": effective_name or f"host-{ip_addr.split('.')[-1]}",
+                                    "domain": effective_dom,
+                                    "workgroup": effective_dom,
                                     "vendor": vendor_name,
                                     "threatScore": r[5] or 0,
                                     "trustLevel": r[6] or "unverified",
@@ -599,13 +647,15 @@ services:
                         for item in parse_arp_table():
                             ip_addr = item["ip"]
                             mac_addr = item["mac"]
-                            hname, m = resolve_device_identity(ip_addr, mac_addr)
+                            hname, m, d = resolve_device_identity(ip_addr, mac_addr)
                             vendor = get_vendor(mac_addr)
                             devices.append({
                                 "id": f"dev-{ip_addr.replace('.', '-')}",
                                 "ip": ip_addr,
                                 "mac": mac_addr,
                                 "hostname": hname,
+                                "domain": d,
+                                "workgroup": d,
                                 "vendor": vendor,
                                 "threatScore": 0,
                                 "trustLevel": "unverified",
@@ -793,24 +843,26 @@ services:
                                         if not mac_found:
                                             mac_found = f"52:54:00:{ip_found.split('.')[-1]}:00:01"
 
-                                        true_name, method = resolve_device_identity(ip_found, mac_found, hname_found)
+                                        true_name, method, dom_found = resolve_device_identity(ip_found, mac_found, hname_found)
                                         vendor = get_vendor(mac_found)
                                         dtype = "gateway" if ip_found.endswith(".1") else "workstation"
 
                                         if conn:
                                             with conn.cursor() as cur:
                                                 cur.execute("""
-                                                    INSERT INTO network_devices (id, ip, mac, hostname, vendor, device_type, discovery_method, is_online, last_seen)
-                                                    VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                                                    INSERT INTO network_devices (id, ip, mac, hostname, domain, vendor, device_type, discovery_method, is_online, last_seen)
+                                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
                                                     ON CONFLICT (ip) DO UPDATE SET 
                                                         hostname = CASE WHEN network_devices.custom_alias IS NOT NULL THEN network_devices.hostname 
+                                                                        WHEN network_devices.hostname = 'WORKGROUP' THEN EXCLUDED.hostname
                                                                         WHEN EXCLUDED.hostname NOT LIKE 'host-%%' THEN EXCLUDED.hostname 
                                                                         ELSE network_devices.hostname END,
+                                                        domain = COALESCE(EXCLUDED.domain, network_devices.domain),
                                                         vendor = CASE WHEN network_devices.vendor = 'Desconhecido' THEN EXCLUDED.vendor ELSE network_devices.vendor END,
                                                         discovery_method = EXCLUDED.discovery_method,
                                                         is_online = TRUE,
                                                         last_seen = CURRENT_TIMESTAMP;
-                                                """, (f"dev-{ip_found.replace('.', '-')}", ip_found, mac_found, true_name, vendor, dtype, method))
+                                                """, (f"dev-{ip_found.replace('.', '-')}", ip_found, mac_found, true_name, dom_found, vendor, dtype, method))
 
                         except Exception as e:
                             logging.error(f"Erro no sweep de rede: {e}")
@@ -820,18 +872,19 @@ services:
                             for item in parse_arp_table():
                                 ip_addr = item["ip"]
                                 mac_addr = item["mac"]
-                                hname, m = resolve_device_identity(ip_addr, mac_addr)
+                                hname, m, d = resolve_device_identity(ip_addr, mac_addr)
                                 vendor = get_vendor(mac_addr)
                                 dtype = "gateway" if ip_addr.endswith(".1") else "workstation"
                                 if conn:
                                     with conn.cursor() as cur:
                                         cur.execute("""
-                                            INSERT INTO network_devices (id, ip, mac, hostname, vendor, device_type, discovery_method, is_online, last_seen)
-                                            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                                            INSERT INTO network_devices (id, ip, mac, hostname, domain, vendor, device_type, discovery_method, is_online, last_seen)
+                                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
                                             ON CONFLICT (ip) DO UPDATE SET 
                                                 last_seen = CURRENT_TIMESTAMP, 
-                                                is_online = TRUE;
-                                        """, (f"dev-{ip_addr.replace('.', '-')}", ip_addr, mac_addr, hname, vendor, dtype, m))
+                                                is_online = TRUE,
+                                                domain = COALESCE(EXCLUDED.domain, network_devices.domain);
+                                        """, (f"dev-{ip_addr.replace('.', '-')}", ip_addr, mac_addr, hname, d, vendor, dtype, m))
                         except Exception:
                             pass
 

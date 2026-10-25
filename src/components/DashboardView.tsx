@@ -697,8 +697,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex items-center justify-between text-xs"
                   >
                     <div className="truncate pr-2">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-medium text-slate-200 truncate">{dev.hostname}</span>
+                        {(dev.domain || dev.workgroup) && (
+                          <span 
+                            className="text-[9px] font-mono text-indigo-300 bg-indigo-950/70 border border-indigo-800/60 px-1 py-0.2 rounded shrink-0" 
+                            title={`Domínio: ${dev.domain || dev.workgroup}`}
+                          >
+                            {dev.domain || dev.workgroup}
+                          </span>
+                        )}
                         <span className={`text-[9px] uppercase font-semibold px-1 py-0.2 rounded shrink-0 ${
                           dev.trustLevel === 'quarantined' ? 'bg-amber-950 text-amber-300' :
                           dev.trustLevel === 'blocked' ? 'bg-rose-950 text-rose-300' :
