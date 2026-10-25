@@ -746,7 +746,7 @@ function getSslDetails(hostname: string, port = 443): Promise<any> {
   });
 }
 
-app.post('/api/web-scan', async (req, res) => {
+app.post(['/api/web-scan', '/api/kali/web-scan'], async (req, res) => {
   const { targetUrl, severityFilter = 'all', scanProfile = 'full', useAI = true } = req.body;
 
   if (!targetUrl || typeof targetUrl !== 'string') {
@@ -1187,7 +1187,7 @@ function checkPortOpen(host: string, port: number, timeoutMs = 2000): Promise<{ 
   });
 }
 
-app.get('/api/network-audit/equipments', (_req, res) => {
+app.get(['/api/network-audit/equipments', '/api/kali/network-audit/equipments'], (_req, res) => {
   res.json({
     profiles: equipmentProfiles,
     credentials: equipmentCredentials.map(c => ({
@@ -1197,7 +1197,7 @@ app.get('/api/network-audit/equipments', (_req, res) => {
   });
 });
 
-app.post('/api/network-audit/profile', (req, res) => {
+app.post(['/api/network-audit/profile', '/api/kali/network-audit/profile'], (req, res) => {
   const profile = req.body;
   if (!profile.name || !profile.brand || !profile.model) {
     return res.status(400).json({ error: 'Nome, marca e modelo são obrigatórios.' });
@@ -1213,14 +1213,14 @@ app.post('/api/network-audit/profile', (req, res) => {
   res.json({ success: true, profile: newProfile });
 });
 
-app.delete('/api/network-audit/profile/:id', (req, res) => {
+app.delete(['/api/network-audit/profile/:id', '/api/kali/network-audit/profile/:id'], (req, res) => {
   const { id } = req.params;
   equipmentProfiles = equipmentProfiles.filter(p => p.id !== id);
   equipmentCredentials = equipmentCredentials.filter(c => c.profileId !== id);
   res.json({ success: true, id });
 });
 
-app.post('/api/network-audit/credential', (req, res) => {
+app.post(['/api/network-audit/credential', '/api/kali/network-audit/credential'], (req, res) => {
   const cred = req.body;
   if (!cred.targetIp || !cred.username || !cred.protocol) {
     return res.status(400).json({ error: 'IP Alvo, Usuário e Protocolo são obrigatórios.' });
@@ -1243,13 +1243,13 @@ app.post('/api/network-audit/credential', (req, res) => {
   res.json({ success: true, credential: { ...newCred, password: '••••••••' } });
 });
 
-app.delete('/api/network-audit/credential/:id', (req, res) => {
+app.delete(['/api/network-audit/credential/:id', '/api/kali/network-audit/credential/:id'], (req, res) => {
   const { id } = req.params;
   equipmentCredentials = equipmentCredentials.filter(c => c.id !== id);
   res.json({ success: true, id });
 });
 
-app.post('/api/network-audit/test-credential', async (req, res) => {
+app.post(['/api/network-audit/test-credential', '/api/kali/network-audit/test-credential'], async (req, res) => {
   const { id } = req.body;
   const cred = equipmentCredentials.find(c => c.id === id);
   if (!cred) {
@@ -1284,7 +1284,7 @@ app.post('/api/network-audit/test-credential', async (req, res) => {
   }
 });
 
-app.post('/api/network-audit/run', async (_req, res) => {
+app.post(['/api/network-audit/run', '/api/kali/network-audit/run'], async (_req, res) => {
   try {
     const issues: any[] = [];
     const timestamp = new Date().toLocaleTimeString('pt-BR');
