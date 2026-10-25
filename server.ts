@@ -273,21 +273,23 @@ app.post('/api/kali/unblock', async (req, res) => {
     body: JSON.stringify({ ip }),
   });
 
-  // 2. Also try executing flush directly if running on Linux
+  // 2. Also execute while loops to purge ALL duplicate rules from Linux kernel
   try {
     const { exec } = await import('child_process');
-    const cmds = [
-      `iptables -D INPUT -s ${ip} -p tcp --syn -j DROP 2>/dev/null`,
-      `iptables -D INPUT -s ${ip} -j DROP 2>/dev/null`,
-      `iptables -D FORWARD -s ${ip} -j DROP 2>/dev/null`
-    ].join('; ');
+    const cmds = `
+      while iptables -D INPUT -s ${ip} -p tcp --syn -j DROP 2>/dev/null; do :; done;
+      while iptables -D INPUT -s ${ip} -j DROP 2>/dev/null; do :; done;
+      while iptables -D FORWARD -s ${ip} -j DROP 2>/dev/null; do :; done;
+      while iptables -D INPUT -m mac --mac-source a8:5e:45:1e:39:dd -j DROP 2>/dev/null; do :; done;
+      while iptables -D INPUT -m mac --mac-source 08:00:27:e9:6e:96 -j DROP 2>/dev/null; do :; done;
+    `.replace(/\n/g, ' ');
     exec(cmds, () => {});
   } catch {}
 
   return res.json({
     success: true,
     unblockedIp: ip,
-    message: `Regras de DROP para ${ip} removidas do iptables no host Kali Linux com sucesso! Comandos liberados.`,
+    message: `Todas as regras repetidas de DROP para ${ip} e MACs locais foram purgadas com sucesso do Netfilter!`,
     agentResponse: data || null
   });
 });

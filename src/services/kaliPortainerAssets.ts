@@ -2,9 +2,7 @@
 // 100% Local, Offline & Air-Gapped (SEM dependência de internet ou redirecionamentos externos)
 // PostgreSQL 16 + Sniffer Scapy + Agente Executor Terminal Kali + Interface Web Completa embutida
 
-export const DOCKER_COMPOSE_YML = `version: '3.8'
-
-# ==============================================================================
+export const DOCKER_COMPOSE_YML = `# ==============================================================================
 # NetSentry SOC - Portainer Stack Deployment para Kali Linux
 # Cole diretamente no Portainer: Stacks -> netsentrysoc -> Editor
 # 100% LOCAL: PostgreSQL 16 + Sniffer Scapy + API REST + Painel Web Local (Porta 3000)
@@ -205,34 +203,84 @@ services:
             return fallback, 'arp'
 
         conn = None
-        # Auto-identificacao das interfaces e IPs do proprio Kali Linux (Self-Protection)
-        LOCAL_HOST_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "192.168.0.156"}
-        LOCAL_HOST_MACS = set()
+        # Auto-identificacao e Protecao contra Auto-Bloqueio (Self-Protection & Gateway Protection)
+        PROTECTED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "192.168.0.156", "192.168.0.1"}
+        PROTECTED_MACS = {"a8:5e:45:1e:39:dd", "08:00:27:e9:6e:96"}
+        LOCAL_HOST_IPS = set(PROTECTED_IPS)
+        LOCAL_HOST_MACS = set(PROTECTED_MACS)
+        GATEWAY_IP = "192.168.0.1"
+        GATEWAY_MAC = "a8:5e:45:1e:39:dd"
 
         def refresh_local_identities():
-            global LOCAL_HOST_IPS, LOCAL_HOST_MACS
+            global LOCAL_HOST_IPS, LOCAL_HOST_MACS, GATEWAY_IP, GATEWAY_MAC, PROTECTED_IPS, PROTECTED_MACS
             try:
                 res = subprocess.run("ip -o -f inet addr show | awk '{print $4}'", shell=True, capture_output=True, text=True)
                 for line in res.stdout.strip().split("\n"):
                     ip_clean = line.split("/")[0].strip()
                     if ip_clean:
                         LOCAL_HOST_IPS.add(ip_clean)
-                res_mac = subprocess.run("ip -o link show | awk '{print $17}'", shell=True, capture_output=True, text=True)
-                for m in res_mac.stdout.strip().split("\n"):
-                    m_clean = m.strip().lower()
-                    if len(m_clean) == 17:
-                        LOCAL_HOST_MACS.add(m_clean)
-            except Exception as e:
-                logging.error(f"Erro ao buscar IPs locais: {e}")
+                        PROTECTED_IPS.add(ip_clean)
+            except Exception:
+                pass
+
+            try:
+                res_link = subprocess.run("ip link show", shell=True, capture_output=True, text=True)
+                for line in res_link.stdout.split("\n"):
+                    l = line.strip().lower()
+                    if "link/ether" in l:
+                        parts = l.split()
+                        try:
+                            idx = parts.index("link/ether")
+                            if idx + 1 < len(parts):
+                                m = parts[idx + 1].strip()
+                                if len(m) == 17:
+                                    LOCAL_HOST_MACS.add(m)
+                                    PROTECTED_MACS.add(m)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+
+            try:
+                res_gw = subprocess.run("ip route show default | awk '{print $3}'", shell=True, capture_output=True, text=True)
+                gw_cand = res_gw.stdout.strip().split("\n")[0].strip()
+                if gw_cand:
+                    GATEWAY_IP = gw_cand
+                    LOCAL_HOST_IPS.add(gw_cand)
+                    PROTECTED_IPS.add(gw_cand)
+                    if os.path.exists("/proc/net/arp"):
+                        with open("/proc/net/arp", "r") as f:
+                            for line in f:
+                                parts = line.split()
+                                if len(parts) >= 4 and parts[0] == GATEWAY_IP:
+                                    m_cand = parts[3].strip().lower()
+                                    if len(m_cand) == 17 and m_cand != "00:00:00:00:00:00":
+                                        GATEWAY_MAC = m_cand
+                                        LOCAL_HOST_MACS.add(m_cand)
+                                        PROTECTED_MACS.add(m_cand)
+            except Exception:
+                pass
+
+        def purge_all_drop_rules():
+            for hip in list(PROTECTED_IPS):
+                if hip and hip != "0.0.0.0":
+                    for chain in ("INPUT", "FORWARD"):
+                        for pattern in (f"-s {hip} -p tcp --syn -j DROP", f"-s {hip} -j DROP", f"-d {hip} -j DROP"):
+                            while True:
+                                res = subprocess.run(f"iptables -D {chain} {pattern} 2>/dev/null", shell=True)
+                                if res.returncode != 0:
+                                    break
+
+            for hmac in list(PROTECTED_MACS):
+                if hmac and len(hmac) == 17:
+                    for chain in ("INPUT", "FORWARD"):
+                        while True:
+                            res = subprocess.run(f"iptables -D {chain} -m mac --mac-source {hmac} -j DROP 2>/dev/null", shell=True)
+                            if res.returncode != 0:
+                                break
 
         refresh_local_identities()
-
-        # Desbloqueio preventivo na inicializacao para corrigir auto-bloqueios anteriores no kernel
-        for hip in list(LOCAL_HOST_IPS):
-            if hip and hip != "127.0.0.1" and hip != "0.0.0.0":
-                subprocess.run(f"iptables -D INPUT -s {hip} -p tcp --syn -j DROP 2>/dev/null", shell=True)
-                subprocess.run(f"iptables -D INPUT -s {hip} -j DROP 2>/dev/null", shell=True)
-                subprocess.run(f"iptables -D FORWARD -s {hip} -j DROP 2>/dev/null", shell=True)
+        purge_all_drop_rules()
 
         def init_db():
             global conn
@@ -817,17 +865,32 @@ services:
                 elif self.path == "/api/unblock":
                     target_ip = payload.get("ip", "192.168.0.156")
                     logging.info(f"🚨 Desbloqueio emergencial de host requisitado para: {target_ip}")
+                    PROTECTED_IPS.add(target_ip)
                     LOCAL_HOST_IPS.add(target_ip)
-                    # Remove regras de DROP para este IP no kernel Linux
-                    for chain in ["INPUT", "FORWARD"]:
-                        subprocess.run(f"iptables -D {chain} -s {target_ip} -p tcp --syn -j DROP 2>/dev/null", shell=True)
-                        subprocess.run(f"iptables -D {chain} -s {target_ip} -j DROP 2>/dev/null", shell=True)
-                        subprocess.run(f"iptables -D {chain} -d {target_ip} -j DROP 2>/dev/null", shell=True)
-                        try:
-                            subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} -s {target_ip} -p tcp --syn -j DROP 2>/dev/null", shell=True)
-                            subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} -s {target_ip} -j DROP 2>/dev/null", shell=True)
-                        except Exception:
-                            pass
+
+                    # 1. Purga TODAS as regras repetidas de IP (loop até zerar)
+                    for chain in ("INPUT", "FORWARD", "OUTPUT"):
+                        for pattern in (f"-s {target_ip} -p tcp --syn -j DROP", f"-s {target_ip} -j DROP", f"-d {target_ip} -j DROP"):
+                            while True:
+                                r = subprocess.run(f"iptables -D {chain} {pattern} 2>/dev/null", shell=True)
+                                if r.returncode != 0:
+                                    break
+                                try:
+                                    subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} {pattern} 2>/dev/null", shell=True)
+                                except Exception:
+                                    pass
+
+                    # 2. Purga TODAS as regras repetidas de MAC que afetaram o host ou roteador
+                    for bad_mac in list(PROTECTED_MACS) + ["a8:5e:45:1e:39:dd", "08:00:27:e9:6e:96"]:
+                        for chain in ("INPUT", "FORWARD"):
+                            while True:
+                                r = subprocess.run(f"iptables -D {chain} -m mac --mac-source {bad_mac} -j DROP 2>/dev/null", shell=True)
+                                if r.returncode != 0:
+                                    break
+                                try:
+                                    subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} -m mac --mac-source {bad_mac} -j DROP 2>/dev/null", shell=True)
+                                except Exception:
+                                    pass
 
                     # Atualiza PostgreSQL para marcar alertas desse IP como não aplicados/whitelisted
                     if conn:
@@ -882,6 +945,16 @@ services:
             server_name localhost;
             root /usr/share/nginx/html;
             index index.html;
+
+            location /api/kali/ {
+                proxy_pass http://127.0.0.1:8080/api/;
+                proxy_http_version 1.1;
+                proxy_set_header Host $$host;
+                proxy_set_header X-Real-IP $$remote_addr;
+                proxy_connect_timeout 300s;
+                proxy_send_timeout 300s;
+                proxy_read_timeout 300s;
+            }
 
             location /api/ {
                 proxy_pass http://127.0.0.1:8080/api/;

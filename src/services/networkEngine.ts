@@ -145,6 +145,9 @@ class NetworkEngine {
 
   private getEndpoint(path: string): string {
     const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    if (!this.kaliHostUrl || this.kaliHostUrl === '/api') {
+      return `/api${cleanPath}`;
+    }
     if (this.kaliHostUrl === '/api/kali' || this.kaliHostUrl.endsWith('/api/kali')) {
       return `/api/kali${cleanPath}`;
     }
@@ -195,10 +198,39 @@ class NetworkEngine {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 1800);
-      const res = await fetch(this.getEndpoint('/status'), { signal: controller.signal });
+      let targetEndpoint = this.getEndpoint('/status');
+      let res: Response | null = null;
+
+      try {
+        res = await fetch(targetEndpoint, { signal: controller.signal });
+      } catch (fetchErr) {
+        // Fallback: se estiver rodando em container Docker com Nginx, tenta /api/status direto
+        if (targetEndpoint.includes('/api/kali/')) {
+          try {
+            const fallbackEndpoint = targetEndpoint.replace('/api/kali/', '/api/');
+            const fallbackRes = await fetch(fallbackEndpoint, { signal: controller.signal });
+            if (fallbackRes.ok) {
+              res = fallbackRes;
+              this.kaliHostUrl = '';
+            }
+          } catch {}
+        }
+      }
       clearTimeout(timeoutId);
 
-      if (res.ok) {
+      // Se o backend respondeu 404 em /api/kali/status, tenta /api/status
+      if (res && !res.ok && res.status === 404 && targetEndpoint.includes('/api/kali/')) {
+        try {
+          const directEndpoint = targetEndpoint.replace('/api/kali/', '/api/');
+          const directRes = await fetch(directEndpoint);
+          if (directRes.ok) {
+            res = directRes;
+            this.kaliHostUrl = '';
+          }
+        } catch {}
+      }
+
+      if (res && res.ok) {
         const data = await res.json();
         const wasDisconnected = !this.state.metrics.isLiveKaliConnected;
         this.state.metrics.isLiveKaliConnected = Boolean(data.isLiveKaliConnected ?? true);
@@ -214,7 +246,7 @@ class NetworkEngine {
           this.addAuditLog(
             'NetSentry Sync Agent',
             'Conexão com Host Kali Linux estabelecida com sucesso',
-            this.kaliHostUrl,
+            this.kaliHostUrl || 'http://localhost:8080',
             'success'
           );
         }

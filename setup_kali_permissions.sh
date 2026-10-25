@@ -54,6 +54,7 @@ apt-get update -qq || true
 PKGS=(
     docker.io
     docker-compose-plugin
+    docker-buildx-plugin
     docker-compose
     iptables
     iproute2

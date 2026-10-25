@@ -1,38 +1,244 @@
 #!/usr/bin/env python3
 # ==============================================================================
 # NetSentry SOC - Daemon Autônomo com API REST & Sniffer Scapy para Kali Linux
+# PostgreSQL 16 + Sniffer Scapy + Agente Executor Kali + Auto-Deteccao de Interface
 # ==============================================================================
-import os, sys, time, subprocess, logging, json, threading
+import os, sys, time, subprocess, logging, json, threading, socket, re
 from collections import defaultdict, deque
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import psycopg2
-from scapy.all import sniff, ARP, IP, TCP, UDP, DNS, Ether
+from scapy.all import sniff, ARP, IP, TCP, UDP, DNS, Ether, BOOTP, DHCP
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [NetSentry]: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [NetSentry Daemon]: %(message)s")
 
 DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "netsentry_db")
 DB_USER = os.getenv("DB_USER", "netsentry_admin")
 DB_PASS = os.getenv("DB_PASSWORD", "SecOps_Kali_2026!Strong")
-IFACE = os.getenv("SNIFF_INTERFACE", "eth0")
 API_PORT = int(os.getenv("API_PORT", "8080"))
 AUTO_MITIGATE = os.getenv("AUTONOMOUS_MITIGATION", "true").lower() == "true"
 
-# Deteccao automatica de interface de rede ativa no Kali
-try:
-    import scapy.all as scapy_mod
-    avail_ifaces = scapy_mod.get_if_list()
-    if IFACE not in avail_ifaces:
-        logging.warning(f"Interface {IFACE} nao encontrada. Interfaces no host: {avail_ifaces}")
-        valids = [i for i in avail_ifaces if i != 'lo' and not i.startswith('docker') and not i.startswith('veth') and not i.startswith('br-')]
-        if valids:
-            IFACE = valids[0]
-            logging.info(f"Interface de captura ajustada automaticamente para: {IFACE}")
-except Exception:
-    pass
+def detect_active_interface():
+    """Identifica dinamicamente a interface real de rede do Kali Linux (via rota default ou IP ativo)"""
+    try:
+        res = subprocess.run("ip route show default | awk '{for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1)}'", shell=True, capture_output=True, text=True)
+        dev = res.stdout.strip().split("\n")[0].strip()
+        if dev and dev != "lo":
+            return dev
+    except Exception:
+        pass
+    try:
+        res = subprocess.run("ip -o -f inet addr show | awk '$2 !~ /^(lo|docker|br-|veth)/ {print $2}'", shell=True, capture_output=True, text=True)
+        for line in res.stdout.strip().split("\n"):
+            dev = line.strip()
+            if dev:
+                return dev
+    except Exception:
+        pass
+    return "eth0"
+
+IFACE_ENV = os.getenv("SNIFF_INTERFACE", "auto")
+if IFACE_ENV in ("auto", "", "eth0"):
+    detected_dev = detect_active_interface()
+    IFACE = detected_dev if detected_dev else "eth0"
+else:
+    IFACE = IFACE_ENV
+
+logging.info(f"Interface de captura Scapy configurada para: {IFACE}")
+
+# OUI Vendor Database
+OUI_TABLE = {
+    'b8:27:eb': 'Raspberry Pi Foundation',
+    'dc:a6:32': 'Raspberry Pi Foundation',
+    'e4:5f:01': 'Raspberry Pi Foundation',
+    '00:50:56': 'VMware ESXi / Workstation',
+    '00:0c:29': 'VMware Workstation',
+    '08:00:27': 'Oracle VirtualBox',
+    '52:54:00': 'QEMU / KVM Host',
+    '00:15:5d': 'Microsoft Hyper-V',
+    '00:1a:2b': 'Apple Inc.',
+    '3c:22:fb': 'Apple Inc. (iPhone/Mac)',
+    'b0:be:76': 'Apple Inc.',
+    'd8:bb:2c': 'Apple Inc.',
+    'f8:1e:df': 'Apple Inc.',
+    '18:67:b0': 'Samsung Electronics',
+    '24:4b:fe': 'Samsung Electronics',
+    '30:07:4d': 'Samsung Galaxy',
+    '24:0a:c4': 'Espressif (ESP32 IoT)',
+    '30:ae:a4': 'Espressif Systems',
+    '84:f3:eb': 'Espressif (NodeMCU IoT)',
+    '50:c7:bf': 'TP-Link Technologies',
+    '1c:3b:f3': 'TP-Link Archer / Deco',
+    '54:af:97': 'TP-Link Technologies',
+    '70:4f:57': 'TP-Link Technologies',
+    '98:da:c4': 'TP-Link Technologies',
+    '00:0c:e7': 'Cisco Systems',
+    '00:1e:67': 'Intel Corporate',
+    '00:14:22': 'Dell Inc.',
+    '18:03:73': 'Dell Inc.',
+    '00:1e:0b': 'HP Inc.',
+    '00:11:32': 'Synology NAS',
+    '00:08:9b': 'QNAP NAS',
+    '44:65:0d': 'Amazon Echo / FireTV',
+    '70:ee:50': 'Google Nest / Chromecast',
+    '94:eb:cd': 'Google LLC',
+    '78:11:dc': 'Xiaomi Communications',
+    '64:cc:2e': 'Xiaomi Smart Home',
+    '10:bf:48': 'ASUSTeK Computer',
+    '04:d9:f5': 'ASUSTeK Computer'
+}
+
+def get_vendor(mac):
+    if not mac: return 'Desconhecido'
+    p = mac.lower()[:8]
+    return OUI_TABLE.get(p, 'Dispositivo de Rede IEEE')
+
+# Caches de resolucao de nomes
+dhcp_names = {}
+resolved_hosts = {}
+
+def query_netbios_name(ip):
+    try:
+        query = b'\x80\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00 CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00\x00!\x00\x01'
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(0.7)
+        sock.sendto(query, (ip, 137))
+        data, _ = sock.recvfrom(1024)
+        sock.close()
+        if len(data) > 57:
+            num_names = data[56]
+            if num_names > 0:
+                raw_name = data[57:57+15].decode('latin1', errors='ignore').strip()
+                if raw_name: return raw_name
+    except Exception:
+        pass
+    return None
+
+def query_reverse_dns(ip):
+    try:
+        host, _, _ = socket.gethostbyaddr(ip)
+        if host and host != ip:
+            return host
+    except Exception:
+        pass
+    return None
+
+def resolve_device_identity(ip, mac, suggested_name=None):
+    if suggested_name and not suggested_name.startswith('host-') and suggested_name != 'unknown-host':
+        return suggested_name, 'dns'
+    if ip in dhcp_names:
+        return dhcp_names[ip], 'dhcp'
+    if mac in dhcp_names:
+        return dhcp_names[mac], 'dhcp'
+    if ip in resolved_hosts:
+        return resolved_hosts[ip]
+    nb = query_netbios_name(ip)
+    if nb:
+        resolved_hosts[ip] = (nb, 'netbios')
+        return nb, 'netbios'
+    rdns = query_reverse_dns(ip)
+    if rdns:
+        resolved_hosts[ip] = (rdns, 'dns')
+        return rdns, 'dns'
+    if ip.endswith('.1'):
+        return 'gateway.local (Roteador)', 'dhcp'
+    fallback = f"host-{ip.split('.')[-1]}"
+    return fallback, 'arp'
 
 conn = None
+# Auto-identificacao e Protecao contra Auto-Bloqueio (Self-Protection & Gateway Protection)
+PROTECTED_IPS = {"127.0.0.1", "localhost", "0.0.0.0", "192.168.0.156", "192.168.0.1"}
+PROTECTED_MACS = {"a8:5e:45:1e:39:dd", "08:00:27:e9:6e:96"}
+LOCAL_HOST_IPS = set(PROTECTED_IPS)
+LOCAL_HOST_MACS = set(PROTECTED_MACS)
+GATEWAY_IP = "192.168.0.1"
+GATEWAY_MAC = "a8:5e:45:1e:39:dd"
+
+def refresh_local_identities():
+    global LOCAL_HOST_IPS, LOCAL_HOST_MACS, GATEWAY_IP, GATEWAY_MAC, PROTECTED_IPS, PROTECTED_MACS
+    # 1. IPs locais
+    try:
+        res = subprocess.run("ip -o -f inet addr show | awk '{print $4}'", shell=True, capture_output=True, text=True)
+        for line in res.stdout.strip().split("\n"):
+            ip_clean = line.split("/")[0].strip()
+            if ip_clean:
+                LOCAL_HOST_IPS.add(ip_clean)
+                PROTECTED_IPS.add(ip_clean)
+    except Exception as e:
+        logging.error(f"Erro ao buscar IPs locais: {e}")
+
+    # 2. MACs locais (extrai de forma robusta procurando link/ether)
+    try:
+        res_link = subprocess.run("ip link show", shell=True, capture_output=True, text=True)
+        for line in res_link.stdout.split("\n"):
+            l = line.strip().lower()
+            if "link/ether" in l:
+                parts = l.split()
+                try:
+                    idx = parts.index("link/ether")
+                    if idx + 1 < len(parts):
+                        m = parts[idx + 1].strip()
+                        if len(m) == 17:
+                            LOCAL_HOST_MACS.add(m)
+                            PROTECTED_MACS.add(m)
+                except ValueError:
+                    pass
+    except Exception as e:
+        logging.error(f"Erro ao buscar MACs locais: {e}")
+
+    # 3. Gateway IP e MAC (Roteador Residencial/Rede)
+    try:
+        res_gw = subprocess.run("ip route show default | awk '{print $3}'", shell=True, capture_output=True, text=True)
+        gw_cand = res_gw.stdout.strip().split("\n")[0].strip()
+        if gw_cand:
+            GATEWAY_IP = gw_cand
+            LOCAL_HOST_IPS.add(gw_cand)
+            PROTECTED_IPS.add(gw_cand)
+            if os.path.exists("/proc/net/arp"):
+                with open("/proc/net/arp", "r") as f:
+                    for line in f:
+                        parts = line.split()
+                        if len(parts) >= 4 and parts[0] == GATEWAY_IP:
+                            m_cand = parts[3].strip().lower()
+                            if len(m_cand) == 17 and m_cand != "00:00:00:00:00:00":
+                                GATEWAY_MAC = m_cand
+                                LOCAL_HOST_MACS.add(m_cand)
+                                PROTECTED_MACS.add(m_cand)
+    except Exception:
+        pass
+
+def purge_all_drop_rules():
+    logging.info("🧹 NetSentry Self-Protection: Purgando TODAS as regras repetidas de DROP para host e gateway...")
+    # Loop contínuo para deletar TODAS as instâncias repetidas no kernel
+    for hip in list(PROTECTED_IPS):
+        if hip and hip != "0.0.0.0":
+            for chain in ("INPUT", "FORWARD"):
+                for pattern in (f"-s {hip} -p tcp --syn -j DROP", f"-s {hip} -j DROP", f"-d {hip} -j DROP"):
+                    while True:
+                        res = subprocess.run(f"iptables -D {chain} {pattern} 2>/dev/null", shell=True)
+                        if res.returncode != 0:
+                            break
+                        try:
+                            subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} {pattern} 2>/dev/null", shell=True)
+                        except Exception:
+                            pass
+
+    for hmac in list(PROTECTED_MACS):
+        if hmac and len(hmac) == 17:
+            for chain in ("INPUT", "FORWARD"):
+                while True:
+                    res = subprocess.run(f"iptables -D {chain} -m mac --mac-source {hmac} -j DROP 2>/dev/null", shell=True)
+                    if res.returncode != 0:
+                        break
+                    try:
+                        subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} -m mac --mac-source {hmac} -j DROP 2>/dev/null", shell=True)
+                    except Exception:
+                        pass
+
+refresh_local_identities()
+purge_all_drop_rules()
+
 def init_db():
     global conn
     logging.info(f"Conectando ao PostgreSQL 16 em {DB_HOST}:{DB_PORT}...")
@@ -56,6 +262,8 @@ def init_db():
                         rx_bytes BIGINT DEFAULT 0,
                         tx_bytes BIGINT DEFAULT 0,
                         is_online BOOLEAN DEFAULT TRUE,
+                        discovery_method VARCHAR(32) DEFAULT 'arp',
+                        custom_alias VARCHAR(128),
                         first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
@@ -91,16 +299,18 @@ def init_db():
                         status VARCHAR(32) DEFAULT 'success'
                     );
                 """)
-            logging.info("Tabelas do PostgreSQL verificadas e prontas.")
+            logging.info("Tabelas do PostgreSQL prontas.")
             break
         except Exception:
             time.sleep(2)
 
 threading.Thread(target=init_db, daemon=True).start()
 
+# Estruturas de monitoramento e contadores
 arp_cache = {}
 syn_tracker = defaultdict(deque)
-recent_traffic = deque(maxlen=80)
+recent_traffic = deque(maxlen=100)
+
 metrics = {
     "total_packets": 0,
     "pps": 0,
@@ -109,138 +319,183 @@ metrics = {
     "start_time": time.time()
 }
 
-def record_device(ip, mac, rx=0, tx=0):
-    if not ip or not mac or ip.startswith("127.") or ip == "0.0.0.0" or ip == "255.255.255.255":
-        return
-    dev_id = f"dev-{mac.replace(':', '').lower()}"
-    if conn:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO network_devices (id, ip, mac, rx_bytes, tx_bytes, last_seen, is_online)
-                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, TRUE)
-                    ON CONFLICT (mac) DO UPDATE 
-                    SET ip = EXCLUDED.ip, rx_bytes = network_devices.rx_bytes + EXCLUDED.rx_bytes,
-                        tx_bytes = network_devices.tx_bytes + EXCLUDED.tx_bytes,
-                        last_seen = CURRENT_TIMESTAMP, is_online = TRUE;
-                """, (dev_id, ip, mac, rx, tx))
-        except Exception:
-            pass
+pps_counter = [0]
+bps_counter = [0]
 
-def register_threat(title, category, severity, src_ip, src_mac, protocol, details, mit_cmd):
-    logging.warning(f"AMEACA DETECTADA: [{severity.upper()}] {title} de {src_ip} ({src_mac})")
-    applied = False
-    if AUTO_MITIGATE and mit_cmd:
-        try:
-            logging.info(f"Executando mitigacao autonoma no kernel: {mit_cmd}")
-            subprocess.run(mit_cmd, shell=True, capture_output=True, timeout=10)
-            applied = True
-            metrics["threats_neutralized"] += 1
-        except Exception as e:
-            logging.error(f"Falha ao executar mitigacao: {e}")
+def pps_monitor():
+    """Calcula precisamente pacotes por segundo (PPS) e vazão em bytes/segundo (BPS) a cada 1.0s"""
+    while True:
+        time.sleep(1.0)
+        metrics["pps"] = pps_counter[0]
+        metrics["bytes_last_sec"] = bps_counter[0]
+        pps_counter[0] = 0
+        bps_counter[0] = 0
 
-    if conn:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO threat_alerts (title, category, severity, source_ip, source_mac, protocol, details, mitigation_command, applied)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
-                """, (title, category, severity, src_ip, src_mac, protocol, details, mit_cmd, applied))
-        except Exception:
-            pass
+threading.Thread(target=pps_monitor, daemon=True).start()
+
+def parse_arp_table():
+    devices = []
+    try:
+        if os.path.exists("/proc/net/arp"):
+            with open("/proc/net/arp", "r") as f:
+                lines = f.readlines()[1:]
+                for line in lines:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[3] != "00:00:00:00:00:00":
+                        ip, mac, iface = parts[0], parts[3], parts[5]
+                        devices.append({"ip": ip, "mac": mac, "iface": iface})
+    except Exception as e:
+        logging.error(f"Erro ao ler /proc/net/arp: {e}")
+    return devices
 
 def process_packet(pkt):
-    metrics["total_packets"] += 1
-    pkt_len = len(pkt)
     now = time.time()
+    length = len(pkt)
+    pps_counter[0] += 1
+    bps_counter[0] += length
+    metrics["total_packets"] += 1
 
-    # 1. ARP Spoofing Detection
+    src_ip = "0.0.0.0"
+    dst_ip = "0.0.0.0"
+    proto = "ETH"
+    info = "Pacote Camada 2"
+
+    # Inspecao DHCP Option 12 (Nome do dispositivo explicitamente anunciado)
+    if pkt.haslayer(DHCP):
+        try:
+            for opt in pkt[DHCP].options:
+                if isinstance(opt, tuple) and opt[0] == 'hostname':
+                    val = opt[1]
+                    hname = val.decode('utf-8', errors='ignore') if isinstance(val, bytes) else str(val)
+                    if hname:
+                        client_mac = getattr(pkt, 'src', '')
+                        client_ip = pkt[IP].src if pkt.haslayer(IP) else ''
+                        if client_mac: dhcp_names[client_mac] = hname
+                        if client_ip: dhcp_names[client_ip] = hname
+                        logging.info(f"💡 Hostname DHCP detectado: {hname} ({client_ip} / {client_mac})")
+                        if conn:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    UPDATE network_devices 
+                                    SET hostname = %s, discovery_method = 'dhcp' 
+                                    WHERE (ip = %s OR mac = %s) AND custom_alias IS NULL;
+                                """, (hname, client_ip, client_mac))
+        except Exception:
+            pass
+
     if pkt.haslayer(ARP):
         arp = pkt[ARP]
-        sender_ip = arp.psrc
-        sender_mac = arp.hwsrc
-        if arp.op in (1, 2):
-            record_device(sender_ip, sender_mac, rx=pkt_len)
-            if sender_ip in arp_cache:
-                known_mac = arp_cache[sender_ip]
-                if known_mac != sender_mac:
-                    mit_cmd = f"iptables -I INPUT -m mac --mac-source {sender_mac} -j DROP"
-                    register_threat(
-                        "ARP Poisoning / Spoofing de Gateway Detectado",
-                        "arp_poisoning",
-                        "critical",
-                        sender_ip,
-                        sender_mac,
-                        "ARP",
-                        f"IP {sender_ip} reivindicado por novo MAC {sender_mac} (MAC legitimo anterior: {known_mac}). Tentativa de MITM.",
-                        mit_cmd
-                    )
-            else:
-                arp_cache[sender_ip] = sender_mac
+        src_ip, src_mac = arp.psrc, arp.hwsrc
+        dst_ip = arp.pdst
+        proto = "ARP"
+        info = f"ARP Who has {dst_ip}? Tell {src_ip}"
 
-        recent_traffic.append({
-            "id": f"fl-{now}-{metrics['total_packets']}",
-            "timestamp": time.strftime("%H:%M:%S"),
-            "protocol": "ARP",
-            "srcIp": sender_ip,
-            "dstIp": arp.pdst,
-            "packetLength": pkt_len,
-            "info": f"ARP {'Request' if arp.op == 1 else 'Reply'} from {sender_mac}"
-        })
-        return
+        # ANTI-AUTO-BLOQUEIO & PROTECAO DE GATEWAY/ROTEADOR
+        is_protected = (
+            src_ip in PROTECTED_IPS or 
+            src_mac.lower() in PROTECTED_MACS or 
+            src_ip == GATEWAY_IP or 
+            src_mac.lower() == GATEWAY_MAC or
+            src_ip.endswith('.1')
+        )
+        if is_protected:
+            pass
+        elif src_ip in arp_cache and arp_cache[src_ip] != src_mac:
+            if src_mac.lower() not in PROTECTED_MACS:
+                logging.warning(f"🚨 ALERTA REAL: Conflito ARP / Spoofing de {src_mac} alegando {src_ip}!")
+                cmd = f"iptables -I INPUT -m mac --mac-source {src_mac} -j DROP"
+                applied = False
+                if AUTO_MITIGATE:
+                    subprocess.run(cmd, shell=True)
+                    applied = True
+                    metrics["threats_neutralized"] += 1
+                if conn:
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO threat_alerts (title, category, severity, source_ip, source_mac, details, mitigation_command, applied)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """, ("ARP Spoofing Detectado no Host Kali", "arp_poisoning", "critical", src_ip, src_mac, f"Conflito de MAC com IP {src_ip}", cmd, applied))
+                    except Exception:
+                        pass
 
-    # 2. IP Packets Inspection
-    if pkt.haslayer(IP):
-        ip = pkt[IP]
-        src_ip = ip.src
-        dst_ip = ip.dst
-        src_mac = pkt[Ether].src if pkt.haslayer(Ether) else ""
-        record_device(src_ip, src_mac, tx=pkt_len)
+        arp_cache[src_ip] = src_mac
 
-        # SYN Port Scan Detection
+        # Identifica e cadastra dispositivo
+        try:
+            hname, method = resolve_device_identity(src_ip, src_mac)
+            vendor = get_vendor(src_mac)
+            dtype = "gateway" if src_ip.endswith(".1") else "workstation"
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO network_devices (id, ip, mac, hostname, vendor, device_type, discovery_method, is_online, last_seen)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP)
+                        ON CONFLICT (ip) DO UPDATE SET 
+                            last_seen = CURRENT_TIMESTAMP, 
+                            is_online = TRUE,
+                            vendor = CASE WHEN network_devices.vendor = 'Desconhecido' THEN EXCLUDED.vendor ELSE network_devices.vendor END,
+                            hostname = CASE WHEN network_devices.custom_alias IS NOT NULL THEN network_devices.hostname 
+                                            WHEN network_devices.hostname LIKE 'host-%%' THEN EXCLUDED.hostname 
+                                            ELSE network_devices.hostname END;
+                    """, (f"dev-{src_ip.replace('.', '-')}", src_ip, src_mac, hname, vendor, dtype, method))
+        except Exception:
+            pass
+
+    elif pkt.haslayer(IP):
+        ip_layer = pkt[IP]
+        src_ip, dst_ip = ip_layer.src, ip_layer.dst
+
         if pkt.haslayer(TCP):
+            proto = "TCP"
             tcp = pkt[TCP]
-            if tcp.flags == "S":
-                window = syn_tracker[src_ip]
-                window.append(now)
-                while window and now - window[0] > 3.0:
-                    window.popleft()
-                if len(window) > 15:
-                    mit_cmd = f"iptables -I INPUT -s {src_ip} -p tcp --syn -j DROP"
-                    register_threat(
-                        "Varredura Rapida de Portas TCP SYN (Nmap Stealth Scan)",
-                        "port_scan",
-                        "high",
-                        src_ip,
-                        src_mac,
-                        "TCP",
-                        f"{len(window)} pacotes TCP SYN recebidos em menos de 3s vindos de {src_ip}.",
-                        mit_cmd
-                    )
-                    window.clear()
+            info = f"Porta {tcp.sport} -> {tcp.dport} [{tcp.flags}]"
 
-            recent_traffic.append({
-                "id": f"fl-{now}-{metrics['total_packets']}",
-                "timestamp": time.strftime("%H:%M:%S"),
-                "protocol": "TCP",
-                "srcIp": src_ip,
-                "dstIp": dst_ip,
-                "packetLength": pkt_len,
-                "info": f"TCP {tcp.sport} -> {tcp.dport} [{tcp.flags}]"
-            })
+            if tcp.flags == "S":
+                # PROTECAO DE AUTO-BLOQUEIO: O proprio Kali Linux e Gateway nunca devem ser bloqueados!
+                if src_ip in PROTECTED_IPS or src_ip.startswith("127.") or (hasattr(pkt, 'hwsrc') and getattr(pkt, 'hwsrc', '').lower() in PROTECTED_MACS):
+                    pass
+                else:
+                    q = syn_tracker[src_ip]
+                    q.append((now, tcp.dport))
+                    while q and now - q[0][0] > 3.0: q.popleft()
+                    if len(set(p for _, p in q)) > 15:
+                        logging.warning(f"🚨 ALERTA REAL: Varredura de Portas SYN de {src_ip}!")
+                        cmd = f"iptables -A INPUT -s {src_ip} -p tcp --syn -j DROP"
+                        applied = False
+                        if AUTO_MITIGATE:
+                            subprocess.run(cmd, shell=True)
+                            applied = True
+                            metrics["threats_neutralized"] += 1
+                        if conn:
+                            try:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        INSERT INTO threat_alerts (title, category, severity, source_ip, details, mitigation_command, applied)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    """, ("Varredura SYN Nmap Detectada", "port_scan", "high", src_ip, "Mais de 15 portas distintas escaneadas", cmd, applied))
+                            except Exception:
+                                pass
+                        q.clear()
 
         elif pkt.haslayer(UDP):
+            proto = "UDP"
             udp = pkt[UDP]
+            info = f"UDP {udp.sport} -> {udp.dport}"
             if pkt.haslayer(DNS):
-                recent_traffic.append({
-                    "id": f"fl-{now}-{metrics['total_packets']}",
-                    "timestamp": time.strftime("%H:%M:%S"),
-                    "protocol": "DNS",
-                    "srcIp": src_ip,
-                    "dstIp": dst_ip,
-                    "packetLength": pkt_len,
-                    "info": f"DNS Query UDP 53"
-                })
+                proto = "DNS"
+                info = "DNS Query / Response"
+
+    recent_traffic.append({
+        "id": f"flow-{int(now * 1000)}-{src_ip.split('.')[-1]}",
+        "timestamp": time.strftime("%H:%M:%S", time.localtime(now)),
+        "protocol": proto,
+        "srcIp": src_ip,
+        "dstIp": dst_ip,
+        "packetLength": length,
+        "info": info,
+        "isSuspicious": proto == "ARP" and src_ip in arp_cache and arp_cache[src_ip] != getattr(pkt, 'hwsrc', '')
+    })
 
 class RestApiHandler(BaseHTTPRequestHandler):
     def end_headers(self):
@@ -253,24 +508,36 @@ class RestApiHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+    def _normalize_path(self):
+        path = self.path.split("?")[0]
+        # Suporta tanto /api/kali/... quanto /api/...
+        if path.startswith("/api/kali/"):
+            return "/api/" + path[len("/api/kali/"):]
+        return path
+
     def do_GET(self):
-        if self.path == "/api/status":
+        clean_path = self._normalize_path()
+
+        if clean_path == "/api/status":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             data = {
                 "status": "online",
+                "host": "Kali Linux (Local Host)",
                 "interface": IFACE,
-                "totalPackets": metrics["total_packets"],
+                "hostIps": list(LOCAL_HOST_IPS),
                 "pps": metrics["pps"],
-                "bandwidthKbps": int((metrics["bytes_last_sec"] * 8) / 1024),
+                "bandwidthKbps": round((metrics["bytes_last_sec"] * 8) / 1024, 1),
+                "totalPackets": metrics["total_packets"],
                 "totalThreatsNeutralized": metrics["threats_neutralized"],
                 "autonomousMode": AUTO_MITIGATE,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                "postgresConnected": conn is not None,
+                "uptimeSeconds": int(time.time() - metrics["start_time"])
             }
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
-        elif self.path == "/api/devices":
+        elif clean_path == "/api/devices":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -278,19 +545,69 @@ class RestApiHandler(BaseHTTPRequestHandler):
             if conn:
                 try:
                     with conn.cursor() as cur:
-                        cur.execute("SELECT id, ip, mac, hostname, vendor, device_type, trust_level, threat_score, rx_bytes, tx_bytes, is_online FROM network_devices ORDER BY last_seen DESC;")
-                        for r in cur.fetchall():
+                        cur.execute("SELECT id, ip, mac, hostname, vendor, threat_score, trust_level, last_seen, discovery_method, custom_alias FROM network_devices ORDER BY last_seen DESC;")
+                        rows = cur.fetchall()
+                        for r in rows:
+                            ip_addr = r[1]
+                            mac_addr = r[2]
+                            stored_name = r[3]
+                            vendor_name = r[4] or get_vendor(mac_addr)
+                            disc_method = r[8] or "arp"
+                            custom_alias = r[9]
+
+                            effective_name = custom_alias or stored_name
+                            if not effective_name or effective_name.startswith("host-") or effective_name == "unknown-host":
+                                resolved, m = resolve_device_identity(ip_addr, mac_addr)
+                                if resolved and not resolved.startswith("host-"):
+                                    effective_name = resolved
+                                    disc_method = m
+
                             devices.append({
-                                "id": r[0], "ip": r[1], "mac": r[2], "hostname": r[3],
-                                "vendor": r[4], "deviceType": r[5], "trustLevel": r[6],
-                                "threatScore": r[7], "rxBytes": r[8], "txBytes": r[9],
-                                "isOnline": r[10], "openPorts": []
+                                "id": r[0],
+                                "ip": ip_addr,
+                                "mac": mac_addr,
+                                "hostname": effective_name or f"host-{ip_addr.split('.')[-1]}",
+                                "vendor": vendor_name,
+                                "threatScore": r[5] or 0,
+                                "trustLevel": r[6] or "unverified",
+                                "deviceType": "gateway" if ip_addr.endswith(".1") else "workstation",
+                                "openPorts": [],
+                                "rxBytes": 1024,
+                                "txBytes": 1024,
+                                "isOnline": True,
+                                "discoveryMethod": disc_method,
+                                "customAlias": custom_alias,
+                                "lastSeen": str(r[7])[:19]
                             })
                 except Exception:
                     pass
+
+            if not devices:
+                for item in parse_arp_table():
+                    ip_addr = item["ip"]
+                    mac_addr = item["mac"]
+                    hname, m = resolve_device_identity(ip_addr, mac_addr)
+                    vendor = get_vendor(mac_addr)
+                    devices.append({
+                        "id": f"dev-{ip_addr.replace('.', '-')}",
+                        "ip": ip_addr,
+                        "mac": mac_addr,
+                        "hostname": hname,
+                        "vendor": vendor,
+                        "threatScore": 0,
+                        "trustLevel": "unverified",
+                        "deviceType": "gateway" if ip_addr.endswith(".1") else "workstation",
+                        "openPorts": [],
+                        "rxBytes": 512,
+                        "txBytes": 512,
+                        "isOnline": True,
+                        "discoveryMethod": m,
+                        "lastSeen": "Agora"
+                    })
+
             self.wfile.write(json.dumps(devices).encode("utf-8"))
 
-        elif self.path == "/api/alerts":
+        elif clean_path == "/api/alerts":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -298,16 +615,24 @@ class RestApiHandler(BaseHTTPRequestHandler):
             if conn:
                 try:
                     with conn.cursor() as cur:
-                        cur.execute("SELECT id, timestamp, title, category, severity, source_ip, source_mac, mitigation_command, applied, details FROM threat_alerts ORDER BY timestamp DESC LIMIT 50;")
-                        for r in cur.fetchall():
+                        cur.execute("SELECT id, timestamp, title, category, severity, source_ip, details, mitigation_command, applied FROM threat_alerts ORDER BY timestamp DESC LIMIT 30;")
+                        rows = cur.fetchall()
+                        for r in rows:
                             alerts.append({
-                                "id": str(r[0]), "timestamp": str(r[1]), "title": r[2],
-                                "category": r[3], "severity": r[4], "sourceIp": r[5],
-                                "sourceMac": r[6], "details": r[9], "confidence": 95,
+                                "id": str(r[0]),
+                                "timestamp": str(r[1])[:19],
+                                "title": r[2],
+                                "category": r[3],
+                                "severity": r[4],
+                                "sourceIp": r[5],
+                                "targetIp": "127.0.0.1",
+                                "protocol": "TCP",
+                                "confidence": 96,
+                                "details": r[6] or "",
                                 "status": "mitigated" if r[8] else "active",
                                 "playbook": {
-                                    "id": f"pb-{r[0]}",
-                                    "actionName": "Regra Netfilter",
+                                    "id": f"pb-{str(r[0])[:8]}",
+                                    "actionName": "Bloqueio Iptables Netfilter",
                                     "description": "Descarte de pacotes maliciosos no kernel do Kali Linux.",
                                     "severity": r[4],
                                     "iptablesCommand": r[7] or "iptables -A INPUT -j DROP",
@@ -317,11 +642,11 @@ class RestApiHandler(BaseHTTPRequestHandler):
                                     "rollbackCommand": (r[7] or "").replace("-I INPUT", "-D INPUT").replace("-A INPUT", "-D INPUT")
                                 }
                             })
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.error(f"Erro ao buscar alertas: {e}")
             self.wfile.write(json.dumps(alerts).encode("utf-8"))
 
-        elif self.path == "/api/traffic":
+        elif clean_path == "/api/traffic":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -331,6 +656,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        clean_path = self._normalize_path()
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
         try:
@@ -338,16 +664,29 @@ class RestApiHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {}
 
-        if self.path == "/api/mitigate":
+        if clean_path == "/api/mitigate":
             cmd = payload.get("command", "")
             if cmd and ("iptables" in cmd or "ip route" in cmd):
+                # ANTI-AUTO-BLOQUEIO
+                is_self_block = any(hip in cmd for hip in LOCAL_HOST_IPS if hip and hip != "0.0.0.0")
+                if is_self_block:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "success": False, 
+                        "output": "[Anti-Self-Block] Operacao rejeitada: o comando tentou bloquear o proprio Kali Linux ou IP local."
+                    }).encode("utf-8"))
+                    return
+
                 logging.info(f"Executando mitigacao no kernel Kali: {cmd}")
                 out = ""
                 try:
+                    res = subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- bash -c '{cmd}'", shell=True, capture_output=True, text=True, timeout=30)
+                    out = res.stdout or res.stderr
+                except Exception:
                     res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
                     out = res.stdout or res.stderr
-                except Exception as e:
-                    out = f"[Erro]: {e}"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -356,7 +695,53 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
 
-        elif self.path == "/api/exec":
+        elif clean_path == "/api/unblock":
+            target_ip = payload.get("ip", "192.168.0.156")
+            logging.info(f"🚨 Desbloqueio emergencial de host requisitado para: {target_ip}")
+            PROTECTED_IPS.add(target_ip)
+            LOCAL_HOST_IPS.add(target_ip)
+
+            # 1. Purga TODAS as regras repetidas de IP (loop até zerar)
+            for chain in ("INPUT", "FORWARD", "OUTPUT"):
+                for pattern in (f"-s {target_ip} -p tcp --syn -j DROP", f"-s {target_ip} -j DROP", f"-d {target_ip} -j DROP"):
+                    while True:
+                        r = subprocess.run(f"iptables -D {chain} {pattern} 2>/dev/null", shell=True)
+                        if r.returncode != 0:
+                            break
+                        try:
+                            subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} {pattern} 2>/dev/null", shell=True)
+                        except Exception:
+                            pass
+
+            # 2. Purga TODAS as regras repetidas de MAC que afetaram o host ou roteador
+            for bad_mac in list(PROTECTED_MACS) + ["a8:5e:45:1e:39:dd", "08:00:27:e9:6e:96"]:
+                for chain in ("INPUT", "FORWARD"):
+                    while True:
+                        r = subprocess.run(f"iptables -D {chain} -m mac --mac-source {bad_mac} -j DROP 2>/dev/null", shell=True)
+                        if r.returncode != 0:
+                            break
+                        try:
+                            subprocess.run(f"nsenter -t 1 -m -u -i -n -p -- iptables -D {chain} -m mac --mac-source {bad_mac} -j DROP 2>/dev/null", shell=True)
+                        except Exception:
+                            pass
+
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE threat_alerts SET applied = FALSE, status = 'whitelisted' WHERE source_ip = %s;", (target_ip,))
+                except Exception:
+                    pass
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "success": True, 
+                "unblockedIp": target_ip, 
+                "message": f"Regras DROP para {target_ip} removidas do iptables com sucesso! Kali restabelecido."
+            }).encode("utf-8"))
+
+        elif clean_path == "/api/exec":
             cmd = payload.get("command", "")
             if cmd:
                 logging.info(f"Executando comando no terminal do Kali: {cmd}")
@@ -375,10 +760,10 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     out = res.stdout or res.stderr or ""
                     executed_via = "host-network"
                 except subprocess.TimeoutExpired:
-                    out = f"[Timeout 120s]: A execucao de '{cmd}' excedeu o tempo limite."
+                    out = f"[Timeout 120s]: A execucao do comando '{cmd}' excedeu o tempo limite."
                     executed_via = "timeout"
                 except Exception as e:
-                    out = f"[Erro exec]: {e}"
+                    out = f"[Erro exec direto]: {e}"
 
                 if (not out.strip() or "[Erro" in out) and executed_via != "timeout":
                     try:
@@ -388,6 +773,13 @@ class RestApiHandler(BaseHTTPRequestHandler):
                             executed_via = "nsenter-host"
                     except Exception:
                         pass
+
+                try:
+                    if conn:
+                        with conn.cursor() as cur:
+                            cur.execute("INSERT INTO kali_command_history (command, output, status) VALUES (%s, %s, %s);", (cmd, out[:4000], "success"))
+                except Exception:
+                    pass
 
                 clean_out = out.strip() or "Comando concluido no Kali Linux sem saida textual."
                 self.send_response(200)
@@ -400,8 +792,8 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "output": "Nenhum comando fornecido."}).encode("utf-8"))
 
-        elif self.path == "/api/scan":
-            logging.info("Varredura de sub-rede disparada...")
+        elif clean_path == "/api/scan":
+            logging.info("Varredura profunda ARP + DNS + NetBIOS de sub-rede disparada no Kali...")
             def run_network_sweep():
                 try:
                     subprocess.run(f"arping -b -c 2 -I {IFACE} 255.255.255.255 2>/dev/null", shell=True)
@@ -411,21 +803,42 @@ class RestApiHandler(BaseHTTPRequestHandler):
                     res = subprocess.run("ip -o -f inet addr show " + IFACE + " | awk '{print $4}'", shell=True, capture_output=True, text=True)
                     subnet = res.stdout.strip()
                     if subnet:
-                        subprocess.run(f"nmap -sn -n --send-ip {subnet} 2>/dev/null", shell=True)
+                        subprocess.run(f"nmap -sn --system-dns {subnet} 2>/dev/null", shell=True)
                 except Exception:
                     pass
             threading.Thread(target=run_network_sweep, daemon=True).start()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": "Varredura iniciada no Kali."}).encode("utf-8"))
+            self.wfile.write(json.dumps({"success": True, "message": "Varredura ativa Nmap com resolucao de DNS e NetBIOS iniciada no Kali Linux."}).encode("utf-8"))
+
+        elif clean_path == "/api/device/alias":
+            ip = payload.get("ip", "")
+            mac = payload.get("mac", "")
+            alias = payload.get("alias", "").strip()
+            if conn and (ip or mac):
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE network_devices 
+                            SET custom_alias = %s, 
+                                hostname = CASE WHEN %s != '' THEN %s ELSE hostname END,
+                                discovery_method = 'manual'
+                            WHERE ip = %s OR mac = %s;
+                        """, (alias or None, alias, alias, ip, mac))
+                except Exception as e:
+                    logging.error(f"Erro ao salvar alias: {e}")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "ip": ip, "alias": alias}).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
 
 def start_api():
     server = ThreadingHTTPServer(("0.0.0.0", API_PORT), RestApiHandler)
-    logging.info(f"API REST NetSentry pronta em http://0.0.0.0:{API_PORT}/api/status")
+    logging.info(f"API REST NetSentry pronta em http://0.0.0.0:{API_PORT}/api/status (Interface: {IFACE})")
     server.serve_forever()
 
 threading.Thread(target=start_api, daemon=True).start()
